@@ -75,6 +75,18 @@ This plugin is a **high-privilege local development tool**; please understand it
 
 **Threat model**: the plugin's trust boundary is the local loopback plus the host's listening address. The plugin **never uploads any data** — all communication is local browser ↔ host traffic.
 
+## Risk disclosure
+
+The plugin applies path-boundary, request-source (CSRF/DNS-rebinding), Host-allowlist, command-injection, and TOCTOU/version-conflict protections, but the following **residual and conditional risks** should be understood:
+
+- **Sensitive-file filtering is best-effort, not a security guarantee**: the default exclusion list matches file names/extensions. Keys without a standard suffix (e.g. a file literally named `secret` or `token`) or compressed/encoded credential files (e.g. `id_rsa.zip`, `cert.base64`) will not match and may be read into the baseline cache and shown as diffs. **Do not use this plugin in workspaces containing such files, or keep sensitive files outside the scanned scope.**
+- **TOCTOU window in revert/redo**: `applyFileWrite` has a very short gap between path validation and the write; if a local malicious process swaps the target file for a symlink pointing outside the workspace exactly in that window, the write could escape. The threat source (a local malicious process) already has filesystem privileges, so the plugin cannot fully defend against it.
+- **Temp-file permissions**: `dsh-dr-tmp-orig-*` files are isolated under `%TEMP%` (NTFS ACL) on Windows; however `chmod 600` is not guaranteed to take effect on Windows or networked filesystems, so on shared machines or SMB/NFS-mounted temp dirs other users may read these temp files containing source code. Files remain on disk while the editor has them open and are cleaned by the OS later.
+- **When the host binds a non-loopback address**: if dsh's `webServer` is bound to `0.0.0.0` or a LAN address, this plugin's local API (including read endpoints) is exposed along with it. The plugin cannot constrain the host's listening address — **do not expose dsh to untrusted networks**.
+- **Debug tool `drvw_debug`**: registered as a model tool (read-only: `state`/`scan`; `revertAll` removed; cwd locked to the current session workspace; scan throttled to once per 2s). Prompt injection could still lure the model into calling it and expose current-workspace information to the model — the model already has workspace file access, so this risk is equivalent to using the fs/shell tools directly.
+- **Resource usage**: scans and baseline caching are capped (`maxFiles` / `primeMaxFiles` / `primeMaxChars`, configurable), but raising the caps too far noticeably increases memory and scan time; pending review items keep original/modified/current copies in memory, so long sessions grow continuously.
+- **Git backfill**: to recover original content for files outside the baseline budget, the plugin runs a read-only `git show` through the host shell (10s timeout, paths containing glob characters are refused). This only reads; it never modifies files.
+
 ## Known limitations
 
 - **Deletions / renames are not tracked**: only in-place modifications are reviewed. A deleted file cannot produce a review item (and cannot be reverted); a rename is seen as "old path deleted + new path added", neither of which enters review scope.
