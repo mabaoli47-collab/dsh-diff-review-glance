@@ -632,7 +632,7 @@ export function apply(ctx) {
     let hash = 0
     for (let i = 0; i < normFile.length; i++) hash = ((hash << 5) - hash + normFile.charCodeAt(i)) | 0
     let rand = ''
-    try { rand = '-' + randomBytes(4).toString('hex') } catch (e) { /* 随机源不可用时省略 */ }
+    try { rand = '-' + randomBytes(16).toString('hex') } catch (e) { /* 随机源不可用时省略 */ }
     const name = 'dsh-dr-tmp-orig-' + (item.turn != null ? item.turn + '-' : '') + (hash >>> 0).toString(36) + rand + '-' + base
     const candidates = []
     try { candidates.push(join(tmpdir(), 'dsh-dr-tmp-orig', name)) } catch (e) { /* tmpdir 不可用则跳过 */ }
@@ -950,7 +950,7 @@ export function apply(ctx) {
   if (tools && typeof tools.register === 'function') {
     const debugTool = defineTool({
       name: 'drvw_debug',
-      description: '读取「对话修改审阅」插件（drvw）的内部状态并支持调试动作：action=state 返回状态（默认，可指定 cwd 参数查看特定工作区）；action=scan 立即执行一次扫描（自动引导基线，使用 lastTurn+1 作为回合号）。仅只读调试动作；cwd 必须等于当前会话工作区。',
+      description: '读取「对话修改审阅」插件（drvw）的内部状态并支持调试动作：action=state 返回状态（默认，可指定 cwd 参数查看特定工作区）；action=scan 立即执行一次扫描（自动引导基线，使用 lastTurn+1 作为回合号）。仅包含不写回工作区文件的调试动作（scan 会更新插件自身的基线/缓存状态）；cwd 必须等于当前会话工作区。',
       // ParameterSchemaSpec：扁平属性映射（defineTool 转成 JSON Schema object 根）
       parameters: {
         action: {
@@ -1154,5 +1154,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.16），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.17），webServer 路由:', ROUTE)
 }
