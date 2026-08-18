@@ -290,14 +290,21 @@ export function apply(ctx) {
         } else if (e.type === 'file') {
           if (e.name.indexOf('dsh-dr-tmp-') === 0) continue
           if (isSensitiveFile(e.name)) continue // 凭据/密钥类文件不纳入对比
+          // 文件级 symlink/junction 越界防护：listDir 可能把指向工作区外的
+          // 文件符号链接报告为 file（如 link -> /etc/passwd / ~/.ssh/id_rsa），
+          // 必须重新 resolve 并用真实路径（targetKey）做 withinRoot 校验，
+          // 越界跳过——否则读取侧会越界读到外部敏感文件并生成 diff
+          let fTarget
+          try { fTarget = await fs.resolve(e.target.displayPath) } catch (err) { continue }
+          if (!withinRoot(root, fTarget.targetKey)) continue
           let ver = e.version
           if (ver === undefined) {
             try {
-              const info = await fs.stat(e.target)
+              const info = await fs.stat(fTarget)
               ver = info ? info.version : undefined
             } catch (err) { ver = undefined }
           }
-          if (ver !== undefined) out.set(e.target.displayPath, { version: String(ver), size: e.size, target: e.target })
+          if (ver !== undefined) out.set(fTarget.displayPath, { version: String(ver), size: e.size, target: fTarget })
           if (out.size >= maxFiles) { truncated = true; break }
         }
       }
@@ -605,18 +612,20 @@ export function apply(ctx) {
     try {
       const v = settings.get(CONFIG_NS)
       if (!v || typeof v !== 'object') return empty
-      const num = (x, def) => {
+      // 上限硬夹紧：防止手工改 settings.yaml 写入极大值导致全盘遍历/预读 DoS
+      const num = (x, def, max) => {
         const n = typeof x === 'number' ? x : (typeof x === 'string' && x.trim() !== '' ? Number(x) : NaN)
-        return Number.isFinite(n) && n > 0 ? Math.floor(n) : def
+        if (!(Number.isFinite(n) && n > 0)) return def
+        return Math.min(Math.floor(n), max)
       }
       return {
         code: typeof v.code === 'string' ? v.code : '',
         devenv: typeof v.devenv === 'string' ? v.devenv : '',
         vsDiffMerge: typeof v.vsDiffMerge === 'string' ? v.vsDiffMerge : '',
-        maxFiles: num(v.maxFiles, MAX_FILES),
-        primeMaxFiles: num(v.primeMaxFiles, PRIME_MAX_FILES),
-        // 配置以 MB 为单位，内部转为字符数
-        primeMaxChars: num(v.primeMaxChars, PRIME_MAX_CHARS / (1024 * 1024)) * (1024 * 1024),
+        maxFiles: num(v.maxFiles, MAX_FILES, 200000),
+        primeMaxFiles: num(v.primeMaxFiles, PRIME_MAX_FILES, 60000),
+        // 配置以 MB 为单位，内部转为字符数；硬上限 1024MB
+        primeMaxChars: num(v.primeMaxChars, PRIME_MAX_CHARS / (1024 * 1024), 1024) * (1024 * 1024),
       }
     } catch (e) { return empty }
   }
@@ -691,22 +700,25 @@ export function apply(ctx) {
     if (base === '.' || base === '..' || base === '') base = 'file'
     let hash = 0
     for (let i = 0; i < normFile.length; i++) hash = ((hash << 5) - hash + normFile.charCodeAt(i)) | 0
-    let rand = ''
-    try { rand = '-' + randomBytes(16).toString('hex') } catch (e) { /* 随机源不可用时省略 */ }
+    // 随机段不可用时直接拒绝写入（省略随机段会使文件名可预测，助长预建 symlink 攻击）
+    let rand
+    try { rand = '-' + randomBytes(16).toString('hex') } catch (e) { return null }
     const name = 'dsh-dr-tmp-orig-' + (item.turn != null ? item.turn + '-' : '') + (hash >>> 0).toString(36) + rand + '-' + base
+    // 目录级 symlink 检查：系统临时目录与工作区回退目录若被预建为符号链接
+    // （多用户 /tmp TOCTOU、工作区被注入链接），都放弃该候选
+    const isSymlinkDir = async (p) => {
+      try {
+        const info = await fs.lstat(p)
+        return !!(info && info.type === 'symlink')
+      } catch (e) { return false } // 不存在 → 不是 symlink（writeText 会自动创建）
+    }
     const candidates = []
     try {
       const tmpDir = join(tmpdir(), 'dsh-dr-tmp-orig')
-      // 多用户共享 /tmp：若 dsh-dr-tmp-orig 被恶意预建为符号链接（TOCTOU，指向任意目录），
-      // 放弃系统临时目录回退工作区——随机文件名挡不住目录级 symlink 跟随
-      let tmpDirOk = true
-      try {
-        const dInfo = await fs.lstat(tmpDir)
-        if (dInfo && dInfo.type === 'symlink') tmpDirOk = false
-      } catch (e) { /* 目录不存在：writeText 会自动创建 */ }
-      if (tmpDirOk) candidates.push(join(tmpDir, name))
+      if (!(await isSymlinkDir(tmpDir))) candidates.push(join(tmpDir, name))
     } catch (e) { /* tmpdir 不可用则跳过 */ }
-    candidates.push(String(s.cwd).replace(/[\\/]$/, '') + sep + '.dsh-dr-tmp-orig' + sep + name)
+    const wsDir = String(s.cwd).replace(/[\\/]$/, '') + sep + '.dsh-dr-tmp-orig'
+    if (!(await isSymlinkDir(wsDir))) candidates.push(wsDir + sep + name)
     for (const tempPath of candidates) {
       try {
         const target = await fs.resolve(tempPath)
@@ -734,11 +746,19 @@ export function apply(ctx) {
         if (!s) return null
         const id = args && args.itemId
         const item = id ? s.items.get(id) : undefined
-        return item ? itemFull(item) : null
+        if (!item) return null
+        // 会话隔离：item 必须属于请求携带的会话（同工作区多会话时禁止跨会话读取）
+        const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
+        if (sid && item.sessionId !== sid) return null
+        return itemFull(item)
       }
       case 'review': {
         const s = pickStore(args)
         if (!s) return { ok: false, error: 'no-store', message: '尚无活跃工作区' }
+        // 会话隔离：请求携带 sessionId 时，禁止操作其他会话的审阅项
+        const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
+        const item = args && args.itemId ? s.items.get(args.itemId) : undefined
+        if (sid && item && item.sessionId !== sid) return { ok: false, error: 'no-store', message: '会话不匹配，操作已拒绝' }
         return reviewItem(s, args && args.itemId, args && args.action)
       }
       case 'reviewGroup': {
@@ -966,7 +986,16 @@ export function apply(ctx) {
   // Host 回环白名单校验：防 DNS 重绑定攻击（恶意域名解析到 127.0.0.1 时，
   // 请求的 Host/Origin 都是 evil.com，仅靠 Origin 同源比较会被绕过）。
   // 允许 localhost / 127.0.0.1 / [::1]，或与服务器实际监听地址（socket.localAddress）一致。
+  // 另外强制客户端来源（remoteAddress）必须为回环：即使宿主把 webServer 绑到
+  // 0.0.0.0/局域网地址（用户主动暴露），本插件的本地 API 也拒绝接受远程客户端——
+  // 局域网内其他主机用 curl 伪造 Host 也无法通过
   function hostAllowed(req) {
+    const remote = req.socket && req.socket.remoteAddress
+    if (remote) {
+      const r = remote.toLowerCase()
+      const remoteLoop = r === '127.0.0.1' || r === '::1' || r === '::ffff:127.0.0.1'
+      if (!remoteLoop) return false
+    }
     const host = req.headers && req.headers.host
     if (!host || typeof host !== 'string') return false
     let hostname = host
@@ -992,20 +1021,19 @@ export function apply(ctx) {
       async handler(req, res) {
         try {
           if (req.method !== 'POST') return sendJson(res, 405, { ok: false, message: 'method not allowed' })
-          // 所有请求（含读操作）校验 Host 回环白名单：读接口泄露工作区路径与 diff 内容，
-          // DNS 重绑定下恶意站点可同源读取，必须一并拦截
+          // 所有请求（含读操作）校验 Host 回环白名单 + 客户端来源回环：读接口泄露
+          // 工作区路径与 diff 内容，DNS 重绑定下恶意站点可同源读取，必须一并拦截
           if (!hostAllowed(req)) return sendJson(res, 403, { ok: false, message: 'forbidden host' })
           const body = await readBody(req)
           const action = body && body.action
-          // 写/危险操作再校验 Origin 同源：浏览器跨站请求携带 Origin 头（不可伪造），
-          // 必须与 Host 同源才放行——挡住恶意网页静默触发 revert / openExternal / saveEditorConfig 的 CSRF。
-          // 无 Origin 头（GUI 同源 fetch、本地客户端）放行：本地进程本就有完整文件权限，不构成额外威胁。
-          if (action === 'review' || action === 'reviewAll' || action === 'reviewSession' || action === 'reviewGroup' || action === 'openExternal' || action === 'saveEditorConfig') {
-            const origin = req.headers && req.headers.origin
-            const host = req.headers && req.headers.host
-            if (origin && !(host && (origin === 'http://' + host || origin === 'https://' + host))) {
-              return sendJson(res, 403, { ok: false, message: 'forbidden origin' })
-            }
+          // 所有动作（含读）统一校验 Origin 同源：浏览器跨站请求携带 Origin 头（不可伪造），
+          // 必须与 Host 同源才放行——挡住恶意网页 CSRF 触发写操作，也挡住宿主配置了
+          // 宽松 CORS 时跨站读取 getState/getItem。
+          // 无 Origin 头（GUI 同源 fetch、本地客户端）放行：本地进程本就有完整文件权限。
+          const origin = req.headers && req.headers.origin
+          const host = req.headers && req.headers.host
+          if (origin && !(host && (origin === 'http://' + host || origin === 'https://' + host))) {
+            return sendJson(res, 403, { ok: false, message: 'forbidden origin' })
           }
           const args = body && body.args
           const result = await handleAction(action, args)
@@ -1227,5 +1255,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.23），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.24），webServer 路由:', ROUTE)
 }
