@@ -105,7 +105,12 @@ export function apply(ctx) {
     if (!s || !s.cwd) return norm(p)
     const c = norm(s.cwd).replace(/\/+$/, '')
     const n = norm(p)
-    return n === c ? '.' : n.indexOf(c + '/') === 0 ? n.slice(c.length + 1) : n
+    // Windows 盘符大小写不敏感：s.cwd 经 canonCwd 强制小写，而 fs.resolve 的
+    // displayPath 可能保留大写盘符（C:/...），严格比较会 miss 导致返回绝对路径、
+    // 以及 git show HEAD:<绝对路径> 报错（Git pathspec 不接受盘符绝对路径）
+    const ck = /^[a-zA-Z]:\//.test(c) ? c.toLowerCase() : c
+    const nk = /^[a-zA-Z]:\//.test(n) ? n.toLowerCase() : n
+    return nk === ck ? '.' : nk.indexOf(ck + '/') === 0 ? n.slice(ck.length + 1) : n
   }
 
   function splitLines(text) {
@@ -345,8 +350,15 @@ export function apply(ctx) {
     // git pathspec 通配符：rel 含 * ? [ 时 git show HEAD:* 会被解释为 glob 匹配
     // （Windows 文件名本不允许这些字符，此处防御类 Unix 文件名场景）
     if (/[*?[\]]/.test(rel)) return null
+    // 控制字符（含换行）拒绝：杜绝折行/多行命令解析
+    if (/[\u0000-\u001f]/.test(rel)) return null
     try {
-      const quoted = "'" + String('HEAD:' + rel).replace(/'/g, "''") + "'"
+      // 平台感知单引号转义：Windows PowerShell 用 ''；POSIX sh/bash 的 '' 是
+      // "闭合 + 空串拼接"，会脱离引号包裹导致命令注入（如 a'; id; 'b.txt）
+      const isPosix = String(process.platform) !== 'win32'
+      const quoted = isPosix
+        ? "'" + String('HEAD:' + rel).replace(/'/g, "'\\''") + "'"
+        : "'" + String('HEAD:' + rel).replace(/'/g, "''") + "'"
       let policy
       if (sandboxPolicy && typeof sandboxPolicy.resolve === 'function') {
         try { policy = sandboxPolicy.resolve({ session: s.session }) } catch (e) { policy = undefined }
@@ -666,7 +678,17 @@ export function apply(ctx) {
     try { rand = '-' + randomBytes(16).toString('hex') } catch (e) { /* 随机源不可用时省略 */ }
     const name = 'dsh-dr-tmp-orig-' + (item.turn != null ? item.turn + '-' : '') + (hash >>> 0).toString(36) + rand + '-' + base
     const candidates = []
-    try { candidates.push(join(tmpdir(), 'dsh-dr-tmp-orig', name)) } catch (e) { /* tmpdir 不可用则跳过 */ }
+    try {
+      const tmpDir = join(tmpdir(), 'dsh-dr-tmp-orig')
+      // 多用户共享 /tmp：若 dsh-dr-tmp-orig 被恶意预建为符号链接（TOCTOU，指向任意目录），
+      // 放弃系统临时目录回退工作区——随机文件名挡不住目录级 symlink 跟随
+      let tmpDirOk = true
+      try {
+        const dInfo = await fs.lstat(tmpDir)
+        if (dInfo && dInfo.type === 'symlink') tmpDirOk = false
+      } catch (e) { /* 目录不存在：writeText 会自动创建 */ }
+      if (tmpDirOk) candidates.push(join(tmpDir, name))
+    } catch (e) { /* tmpdir 不可用则跳过 */ }
     candidates.push(String(s.cwd).replace(/[\\/]$/, '') + sep + '.dsh-dr-tmp-orig' + sep + name)
     for (const tempPath of candidates) {
       try {
@@ -1188,5 +1210,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.20），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.21），webServer 路由:', ROUTE)
 }

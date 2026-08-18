@@ -88,3 +88,15 @@
   - host `reviewItem` 返回更丰富的冲突信息（含当前文件内容），client 渲染 diff。
   - 「强制覆盖」需显式用户确认（可能丢弃外部新修改）。
 - **风险**：强制覆盖可能丢失用户新修改——UI 必须明确警告；预览渲染成本。
+
+### 4. 外部编辑器跨平台适配（macOS / Linux）— P3
+
+- **背景**：`buildEditorCommand` 硬编码 PowerShell 语法（`Start-Process`/`Get-Command`/`Test-Path`），Linux/macOS 上「其他打开方式」直接语法错误不可用（当前仅 Windows 部署正常）。
+- **实施要点**：按平台分支——macOS `open -a <app>` / `code`、Linux `xdg-open` / `code`；编辑器探测路径也要平台化（`/usr/bin/code` 等）。
+- **注意**：`readOriginalFromGit` 的单引号转义已是平台感知（Windows `''` / POSIX `'\''`），此改动只涉及 `buildEditorCommand`。
+
+### 5. 内存清理（长会话 / 大工作区）— P3
+
+- **背景**：`STORES` 桶与 `s.items`（原文/修改/当前三份全文）无清理机制，长会话内存持续增长（README 风险声明已披露）。
+- **实施要点**：可选监听 dsh 会话销毁事件清理对应 `SESSIONS`/`store.sessions`/`STORES` 条目；或为 `s.items` 增加"已审阅项数量上限、超出淘汰最旧"的修剪策略。
+- **风险**：激进清理影响历史回看——需先确认 dsh 会话生命周期语义（会话是否 dispose、持久会话如何界定）。

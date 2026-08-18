@@ -110,12 +110,15 @@ function apply(ctx) {
       if (refreshQueued) { refreshQueued = false; refresh() }
     }
   }
+  // 请求序号：防止慢响应覆盖新请求的结果（快速展开/折叠同一 item 时的竞态）
+  let fetchSeq = 0
   async function fetchItem(itemId) {
     if (detailCache.has(itemId)) return detailCache.get(itemId)
+    const seq = ++fetchSeq
     try {
       const d = await callHost('getItem', Object.assign({ itemId }, cwdArg()))
-      if (d) detailCache.set(itemId, d)
-      return d
+      if (seq === fetchSeq && d) detailCache.set(itemId, d)
+      return seq === fetchSeq ? d : null
     } catch (e) { return null }
   }
   async function doReview(itemId, action) {
@@ -144,9 +147,9 @@ function apply(ctx) {
     // { sessionId: currentSessionId } 覆盖，导致点击其他会话的"本会话全部保留"时
     // 误操作当前会话（严重 UI 逻辑 bug）
     try { await callHost('reviewSession', Object.assign({}, cwdArg(), { sessionId })) } catch (e) {}
+    // 前缀精确匹配（startsWith 比 indexOf 切割更稳：item id 为 sessionId::turn::path）
     for (const key of Array.from(detailCache.keys())) {
-      const idx = key.indexOf('::')
-      if (idx > 0 && key.slice(0, idx) === sessionId) detailCache.delete(key)
+      if (key.indexOf(sessionId + '::') === 0) detailCache.delete(key)
     }
     await refresh()
   }
