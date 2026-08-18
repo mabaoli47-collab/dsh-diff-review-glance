@@ -241,10 +241,12 @@ export function apply(ctx) {
       || /^(secret|token|api[-_]?key|apikey)(\..*)?$/i.test(name)
   }
   // 边界校验：解析后的真实路径（targetKey，可能经过软链接解析）必须位于工作区根目录内，
-  // 防止工作区内的 symlink/junction 指向外部敏感目录（如 ~/.ssh）时被纳入对比甚至被 revert 篡改
+  // 防止工作区内的 symlink/junction 指向外部敏感目录（如 ~/.ssh）时被纳入对比甚至被 revert 篡改。
+  // 统一转小写比较：canonCwd 会把 Windows 盘符路径转小写存储，而 fs.resolve 返回的
+  // targetKey 可能保留原始大写盘符（C:/...），严格比较会误判越界导致写回/扫描误杀
   function withinRoot(root, targetKey) {
-    const r = String(root).replace(/\\/g, '/').replace(/\/+$/, '')
-    const t = String(targetKey).replace(/\\/g, '/')
+    const r = String(root).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const t = String(targetKey).replace(/\\/g, '/').toLowerCase()
     return t === r || t.indexOf(r + '/') === 0
   }
   async function walkWorkspace(root) {
@@ -586,10 +588,13 @@ export function apply(ctx) {
     }
     // PowerShell 单引号字符串：内部单引号用 '' 转义，杜绝路径含 ' 时的注入/提前终止
     const q = (line) => "'" + String(line).replace(/'/g, "''") + "'"
+    // -ArgumentList 多参数必须用逗号分隔（PowerShell 数组语法）：
+    // 空格分隔会被解析为 Start-Process 自身的位置参数而报
+    // "A positional parameter cannot be found"（外部 diff 打开失败）
     const pOpen = q(left)
-    const pDm = q(left) + ' ' + q(right)
-    const pDevenvDiff = '"/diff" ' + q(left) + ' ' + q(right)
-    const pCodeDiff = '"--diff" ' + q(left) + ' ' + q(right)
+    const pDm = q(left) + ', ' + q(right)
+    const pDevenvDiff = '"/diff", ' + q(left) + ', ' + q(right)
+    const pCodeDiff = '"--diff", ' + q(left) + ', ' + q(right)
     const launch = (fileExpr, argLine) =>
       'try { Start-Process -FilePath ' + fileExpr + ' -ArgumentList ' + argLine + ' -ErrorAction Stop } catch { Write-Output (\"ERR:\" + $_.Exception.Message); exit 1 }; Write-Output \"OK:\"'
     if (editor === 'vs') {
@@ -1154,5 +1159,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.17），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.18），webServer 路由:', ROUTE)
 }

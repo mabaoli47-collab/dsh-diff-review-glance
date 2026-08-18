@@ -77,8 +77,11 @@ function apply(ctx) {
     for (const fn of Array.from(subs)) { try { fn(s) } catch (e) {} }
   }
 
+  // 轮询与操作后的刷新共用：fetch 进行中时把请求排队，完成后补跑一次——
+  // 避免 doReview/keepAll 等操作与 2 秒轮询碰撞时操作结果要等下一周期才上屏
+  let refreshQueued = false
   async function refresh() {
-    if (fetching) return
+    if (fetching) { refreshQueued = true; return }
     fetching = true
     try {
       const st = await callHost('getState', cwdArg())
@@ -102,7 +105,10 @@ function apply(ctx) {
         emit()
       }
     }
-    finally { fetching = false }
+    finally {
+      fetching = false
+      if (refreshQueued) { refreshQueued = false; refresh() }
+    }
   }
   async function fetchItem(itemId) {
     if (detailCache.has(itemId)) return detailCache.get(itemId)
@@ -134,7 +140,10 @@ function apply(ctx) {
     await refresh()
   }
   async function keepSession(sessionId) {
-    try { await callHost('reviewSession', Object.assign({ sessionId }, cwdArg())) } catch (e) {}
+    // cwdArg() 在前、目标 sessionId 在后覆盖：否则 { sessionId } 会被 cwdArg() 的
+    // { sessionId: currentSessionId } 覆盖，导致点击其他会话的"本会话全部保留"时
+    // 误操作当前会话（严重 UI 逻辑 bug）
+    try { await callHost('reviewSession', Object.assign({}, cwdArg(), { sessionId })) } catch (e) {}
     for (const key of Array.from(detailCache.keys())) {
       const idx = key.indexOf('::')
       if (idx > 0 && key.slice(0, idx) === sessionId) detailCache.delete(key)
