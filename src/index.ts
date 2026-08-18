@@ -62,11 +62,12 @@ export function apply(ctx) {
   }
   // 规范化 cwd：统一分隔符 + 解析 . 与 ..（posix.normalize）+ 去尾斜杠 + Windows 盘符路径整体小写。
   // 不解析 . / .. 会导致 pickStore/relOf/withinRoot 的字符串比较因 C:/proj/./sub 与
-  // C:/proj/sub 不一致而失效（状态桶错乱、relOf 返回绝对路径、Git pathspec 异常）
+  // C:/proj/sub 不一致而失效（状态桶错乱、relOf 返回绝对路径、Git pathspec 异常）。
+  // 盘符根目录（C:/）必须保留末尾斜杠：截成 "C:" 会使盘符正则失配、大小写不折叠
   function canonCwd(cwd) {
     let c = posix.normalize(String(cwd).replace(/\\/g, '/'))
-    while (c.length > 1 && c.endsWith('/')) c = c.slice(0, -1)
-    if (/^[a-zA-Z]:\//.test(c)) c = c.toLowerCase()
+    while (c.length > 3 && c.endsWith('/')) c = c.slice(0, -1)
+    if (/^[a-zA-Z]:(\/|$)/.test(c)) c = c.toLowerCase()
     return c
   }
   function getStore(cwd) {
@@ -349,6 +350,9 @@ export function apply(ctx) {
     if (!shell || typeof shell.resolve !== 'function' || typeof shell.run !== 'function') return null
     const rel = relOf(path, s)
     if (!rel || rel === '.' || rel.indexOf('..') === 0) return null
+    // 绝对路径前置拦截（relOf 异常返回绝对路径时不做无用的 git show 调用）：
+    // POSIX 绝对路径 或 Windows 盘符路径
+    if (posix.isAbsolute(rel) || /^[a-zA-Z]:/.test(rel)) return null
     // git pathspec 通配符：rel 含 * ? [ 时 git show HEAD:* 会被解释为 glob 匹配
     // （Windows 文件名本不允许这些字符，此处防御类 Unix 文件名场景）
     if (/[*?[\]]/.test(rel)) return null
@@ -619,9 +623,20 @@ export function apply(ctx) {
 
   function buildEditorCommand(editor, left, right, diff, cfg) {
     // 防御：文件路径（来自工作区文件名/临时文件）含控制字符时直接拒绝——单引号转义只处理
-    // 单引号注入，控制字符（换行等）在极端文件名场景下不应进入 PowerShell 命令
+    // 单引号注入，控制字符（换行等）在极端文件名场景下不应进入 shell 命令
     if (/[\u0000-\u001f]/.test(String(left)) || /[\u0000-\u001f]/.test(String(right))) {
       return 'Write-Output \'ERR:文件路径含控制字符，已拒绝打开\'; exit 1'
+    }
+    // POSIX（macOS / Linux）：code 命令（或配置路径）打开/diff；VS2022 仅 Windows 支持。
+    // 命令前先校验可执行文件存在，失败输出 ERR:（避免 command-not-found 后仍 echo OK: 误判成功）
+    if (String(process.platform) !== 'win32') {
+      const q = (line) => "'" + String(line).replace(/'/g, "'\\''") + "'"
+      const exe = (cfg.code && cfg.code.trim()) ? cfg.code.trim() : 'code'
+      const exeQ = /^[a-zA-Z0-9_\-./]+$/.test(exe) ? exe : q(exe)
+      if (editor === 'vs') return "echo 'ERR:VS2022 仅支持 Windows'; exit 1"
+      const check = 'if ! command -v ' + exeQ + ' >/dev/null 2>&1; then echo \'ERR:编辑器命令不存在\'; exit 1; fi'
+      const run = diff ? exeQ + ' --diff ' + q(left) + ' ' + q(right) + '; echo OK:' : exeQ + ' ' + q(left) + '; echo OK:'
+      return check + '; ' + run
     }
     // PowerShell 单引号字符串：内部单引号用 '' 转义，杜绝路径含 ' 时的注入/提前终止
     const q = (line) => "'" + String(line).replace(/'/g, "''") + "'"
@@ -775,11 +790,11 @@ export function apply(ctx) {
     const patch = {}
     for (const key of ['code', 'devenv', 'vsDiffMerge']) {
       const raw = typeof args[key] === 'string' ? args[key] : ''
-      // 拒绝控制字符（换行等）+ Shell 元字符（PowerShell 的 $ 反引号 双引号，以及
-      // bash/sh 的 ' ; | & ( ) ）：路径最终会进入 shell 命令，杜绝跨平台脚本注入面
-      // （纵深防御；正常编辑器路径不含这些字符）
+      // 拒绝控制字符（换行等）+ Shell 元字符：路径最终会进入 shell 命令，杜绝跨平台脚本注入面。
+      // 注意：括号 ( ) 不拒绝——Windows 默认路径 C:\Program Files (x86)\... 含括号，
+      // 且路径经 q() 单引号包裹后括号天然安全（此前误杀该路径属回归）
       if (/[\u0000-\u001f]/.test(raw)) return { ok: false, message: key + ' 含控制字符，已拒绝' }
-      if (/[$`"';&|()]/.test(raw)) return { ok: false, message: key + ' 含 Shell 危险字符，已拒绝' }
+      if (/[$`"';&|]/.test(raw)) return { ok: false, message: key + ' 含 Shell 危险字符，已拒绝' }
       patch[key] = raw.trim()
     }
     // 数字上限项：合法正整数才写入，否则存 0（读取时回退默认）
@@ -1212,5 +1227,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.22），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.23），webServer 路由:', ROUTE)
 }
