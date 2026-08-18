@@ -25,11 +25,19 @@ function readSource(path) {
   return readFileSync(path, 'utf8').replace(/^\uFEFF/, '')
 }
 
-// ---- host ----
-const hostSrc = readSource(join(root, 'src', 'index.ts'))
-const hostOut = hostSrc.replace(/import\s+type\s+[^;]+;\s*/g, '')
-writeFileSync(join(lib, 'index.js'), hostOut)
-console.log('[build] lib/index.js')
+// ---- host (multi-file) ----
+// src/index.ts 与 src/host/*.ts 逐文件转 lib/（保留相对 import，如 './host/util.js'；
+// Node ESM 按显式 .js 扩展名解析）。import type 行剥离。
+const hostFiles = ['src/index.ts', 'src/host/util.ts']
+for (const rel of hostFiles) {
+  const outRel = rel.replace(/^src\//, '').replace(/\.ts$/, '.js')
+  const outPath = join(lib, outRel)
+  mkdirSync(dirname(outPath), { recursive: true })
+  const src = readSource(join(root, rel))
+  const out = src.replace(/import\s+type\s+[^;]+;\s*/g, '')
+  writeFileSync(outPath, out)
+  console.log('[build] lib/' + outRel)
+}
 
 // ---- client ----
 const clientSrc = readSource(join(root, 'src', 'client', 'index.ts'))
