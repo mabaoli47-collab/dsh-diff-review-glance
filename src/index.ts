@@ -317,6 +317,33 @@ export function apply(ctx) {
     if (!g) { g = { sessionId: String(sessionId), turn, items: new Map() }; s.groups.set(key, g) }
     return g
   }
+  // 只读 Git 补读：git show HEAD:<relPath> 取文件在 HEAD 的原始内容，
+  // 用于"基线预算未覆盖的文件被修改"时恢复对比基准；非 git 仓库 / 失败返回 null（走 originalMissing 兜底）
+  async function readOriginalFromGit(s, path) {
+    if (!shell || typeof shell.resolve !== 'function' || typeof shell.run !== 'function') return null
+    const rel = relOf(path, s)
+    if (!rel || rel === '.' || rel.indexOf('..') === 0) return null
+    try {
+      const quoted = "'" + String('HEAD:' + rel).replace(/'/g, "''") + "'"
+      let policy
+      if (sandboxPolicy && typeof sandboxPolicy.resolve === 'function') {
+        try { policy = sandboxPolicy.resolve({ session: s.session }) } catch (e) { policy = undefined }
+      }
+      const spec = shell.resolve({
+        command: 'git show ' + quoted,
+        workdir: s.cwd,
+        timeoutMs: 10000,
+        ...(policy ? { sandboxPolicy: policy } : {}),
+      })
+      const result = await shell.run(spec)
+      const raw = result && result.stdout
+      const out = (raw && typeof raw === 'object' && typeof raw.text === 'string') ? raw.text : String(raw || '')
+      const trimmed = out.trim()
+      if (trimmed.indexOf('fatal:') === 0 || trimmed.indexOf('ERR:') === 0) return null
+      return out
+    } catch (e) { return null }
+  }
+
   async function scan(s, sessionId, turn) {
     if (!s.cwd) return
     s.scanning = true
@@ -343,7 +370,13 @@ export function apply(ctx) {
           if (info.size !== undefined && info.size > MAX_READ_BYTES) continue
           let current
           try { current = await fs.readText(info.target) } catch (e) { continue }
-          const original = s.contentCache.get(path)
+          let original = s.contentCache.get(path)
+          if (original === undefined) {
+            // 基线预算外（primeMaxFiles/primeMaxChars 未覆盖）或缓存缺失的文件被修改：
+            // 尝试从 Git 历史补读原始内容（只读 git show），失败则按"原始未知"处理
+            original = await readOriginalFromGit(s, path)
+            if (typeof original === 'string') s.contentCache.set(path, original)
+          }
           if (original !== undefined && original === current) {
             s.contentCache.set(path, current)
             continue
@@ -535,6 +568,11 @@ export function apply(ctx) {
   }
 
   function buildEditorCommand(editor, left, right, diff, cfg) {
+    // 防御：文件路径（来自工作区文件名/临时文件）含控制字符时直接拒绝——单引号转义只处理
+    // 单引号注入，控制字符（换行等）在极端文件名场景下不应进入 PowerShell 命令
+    if (/[\u0000-\u001f]/.test(String(left)) || /[\u0000-\u001f]/.test(String(right))) {
+      return 'Write-Output "ERR:文件路径含控制字符，已拒绝打开"; exit 1'
+    }
     // PowerShell 单引号字符串：内部单引号用 '' 转义，杜绝路径含 ' 时的注入/提前终止
     const q = (line) => "'" + String(line).replace(/'/g, "''") + "'"
     const pOpen = q(left)
@@ -1055,11 +1093,16 @@ export function apply(ctx) {
   // 事件监听用 ctx.effect 包裹，随插件 fiber 卸载自动清理，避免长期运行累积
   // 会话登记：会话（第二层）→ 工作区（第一层）绑定 + 轮次计数 + 可读标签
   // dsh 的会话标题是日志事件 session/title（data.title），不在 SessionHeader 里；
-  // 从 agent.session.events 中取最近一条（与 dsh 官方测试同款读取方式）
+  // 从 agent.session.events 中取最近一条（与 dsh 官方测试同款读取方式；用倒序查找而非 findLast，兼容旧 Node）
   function readSessionTitle(agent) {
     try {
       const sess = agent && agent.session
-      const ev = sess && Array.isArray(sess.events) ? sess.events.findLast((e) => e && e.type === 'session/title') : null
+      let ev = null
+      if (sess && Array.isArray(sess.events)) {
+        for (let i = sess.events.length - 1; i >= 0; i--) {
+          if (sess.events[i] && sess.events[i].type === 'session/title') { ev = sess.events[i]; break }
+        }
+      }
       const t = ev && ev.data && typeof ev.data.title === 'string' ? ev.data.title.trim() : ''
       return t || ''
     } catch (e) { return '' }
@@ -1111,5 +1154,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.13），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.14），webServer 路由:', ROUTE)
 }

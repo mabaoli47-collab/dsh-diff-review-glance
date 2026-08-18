@@ -256,7 +256,19 @@ function apply(ctx) {
     }
     for (let hi = 0; hi < hunks.length; hi++) {
       const hunk = hunks[hi]
-      if (hi > 0 && hunk.gap > 0) ctxCount += hunk.gap
+      if (hi === 0) {
+        // 文件开头到首个 Hunk 之间未纳入 diff 的行：由首行行号推导（行号从 1 起，减 1 即前置未改动行数）
+        const first = hunk.rows && hunk.rows[0]
+        let firstLine = 0
+        if (first) {
+          if (first.k === 'c') firstLine = first.o || first.n || 0
+          else firstLine = (first.o && first.o.n) || (first.n && first.n.n) || 0
+        }
+        const lead = firstLine > 1 ? firstLine - 1 : 0
+        if (lead > 0) ctxCount += lead
+      } else if (hunk.gap > 0) {
+        ctxCount += hunk.gap
+      }
       for (const row of hunk.rows) {
         if (row.k === 'c') { ctxCount++; continue }
         flush()
@@ -317,6 +329,8 @@ function apply(ctx) {
       setInfo(null)
       const r = await doReview(item.id, action)
       if (r && r.ok === false && r.message) setError(r.message)
+      // 撤销/重做后旧 diff 已失效：重置局部 detail 缓存，避免展开时展示操作前的旧内容
+      setDetail(null)
       setBusy(false)
     }
     async function openExternal(editor, diff) {
