@@ -275,8 +275,10 @@ export function apply(ctx) {
       let target
       try { target = await fs.resolve(cur.path) } catch (e) { continue }
       if (!withinRoot(root, target.targetKey)) continue // 软链接越界：跳过，不纳入对比
-      if (seen.has(target.targetKey)) continue
-      seen.add(target.targetKey)
+      // seen 用 canonCwd 归一（盘符统一小写）：防止底层 resolve 大小写不一致时同一目录重复入队
+      const seenKey = canonCwd(target.targetKey)
+      if (seen.has(seenKey)) continue
+      seen.add(seenKey)
       let entries
       try { entries = await fs.listDir(target) } catch (e) { continue }
       for (let k = entries.length - 1; k >= 0; k--) {
@@ -619,7 +621,7 @@ export function apply(ctx) {
     // 防御：文件路径（来自工作区文件名/临时文件）含控制字符时直接拒绝——单引号转义只处理
     // 单引号注入，控制字符（换行等）在极端文件名场景下不应进入 PowerShell 命令
     if (/[\u0000-\u001f]/.test(String(left)) || /[\u0000-\u001f]/.test(String(right))) {
-      return 'Write-Output "ERR:文件路径含控制字符，已拒绝打开"; exit 1'
+      return 'Write-Output \'ERR:文件路径含控制字符，已拒绝打开\'; exit 1'
     }
     // PowerShell 单引号字符串：内部单引号用 '' 转义，杜绝路径含 ' 时的注入/提前终止
     const q = (line) => "'" + String(line).replace(/'/g, "''") + "'"
@@ -641,11 +643,11 @@ export function apply(ctx) {
         + "if ($d -is [string]) { $dPath = $d } else { $dPath = $d.Source }"
       const dExpr = cfg.devenv
         // 报错消息不含配置值：PowerShell 双引号字符串会执行 $()/反引号转义，插值用户输入可被注入
-        ? '$dPath = ' + q(cfg.devenv) + '; if (-not (Test-Path $dPath)) { Write-Output \"ERR:配置的 devenv 路径不存在\"; exit 1 }'
+        ? '$dPath = ' + q(cfg.devenv) + '; if (-not (Test-Path $dPath)) { Write-Output \'ERR:配置的 devenv 路径不存在\'; exit 1 }'
         : probeDevenv
       if (diff) {
         const dm = cfg.vsDiffMerge
-          ? '$dm = ' + q(cfg.vsDiffMerge) + '; if (Test-Path $dm) { ' + launch('$dm', pDm) + ' } else { Write-Output \"ERR:配置的 vsDiffMerge 路径不存在\"; exit 1 }'
+          ? '$dm = ' + q(cfg.vsDiffMerge) + '; if (Test-Path $dm) { ' + launch('$dm', pDm) + ' } else { Write-Output \'ERR:配置的 vsDiffMerge 路径不存在\'; exit 1 }'
           : "$dm = (Split-Path $dPath) + '\\CommonExtensions\\Microsoft\\TeamFoundation\\Team Explorer\\vsDiffMerge.exe'; if (Test-Path $dm) { " + launch('$dm', pDm) + ' } else { ' + launch('$dPath', pDevenvDiff) + ' }'
         return dExpr + '; ' + dm
       }
@@ -655,7 +657,7 @@ export function apply(ctx) {
       "$c = Get-Command code -ErrorAction SilentlyContinue; if (-not $c) { Write-Output 'MISSING:VSCode'; exit 1 }; "
       + "$exe = $c.Source; if ($exe -like '*\\bin\\code.cmd') { $exe = $exe.Substring(0, $exe.Length - '\\bin\\code.cmd'.Length) + '\\Code.exe' }; if (-not (Test-Path $exe)) { $exe = $c.Source }"
     const exeExpr = cfg.code
-      ? '$exe = ' + q(cfg.code) + '; if (-not (Test-Path $exe)) { Write-Output \"ERR:配置的 VS Code 路径不存在\"; exit 1 }'
+      ? '$exe = ' + q(cfg.code) + '; if (-not (Test-Path $exe)) { Write-Output \'ERR:配置的 VS Code 路径不存在\'; exit 1 }'
       : probeCode
     return exeExpr + '; ' + launch('$exe', diff ? pCodeDiff : pOpen)
   }
@@ -1210,5 +1212,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.21），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.22），webServer 路由:', ROUTE)
 }
