@@ -1,0 +1,13 @@
+# dsh-diff-review bundle patch
+#
+# Installed through the dsh plugin CLI:
+#
+#   dsh plugin --profile <name> add file:<path-to-this-package>
+#
+# The CLI reconciles dsh.profile.bundles and appends this bundle to the stack;
+# the profile boot merges THIS patch (a single insert of the plugin row) into
+# the composition. Host half loads from lib/index.js; client half is served
+# from lib/client.js via the dsh.client manifest.
+- insert:
+    - id: dsh-diff-review
+      name: 'dsh-diff-review'
