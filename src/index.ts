@@ -238,6 +238,7 @@ export function apply(ctx) {
       || /^(id_rsa|id_dsa|id_ecdsa|id_ed25519)$/i.test(name)
       || /^\.(netrc|npmrc|git-credentials|pgpass)$/i.test(name)
       || /^htpasswd$/i.test(name)
+      || /^(secret|token|api[-_]?key|apikey)(\..*)?$/i.test(name)
   }
   // 边界校验：解析后的真实路径（targetKey，可能经过软链接解析）必须位于工作区根目录内，
   // 防止工作区内的 symlink/junction 指向外部敏感目录（如 ~/.ssh）时被纳入对比甚至被 revert 篡改
@@ -330,6 +331,9 @@ export function apply(ctx) {
     if (!shell || typeof shell.resolve !== 'function' || typeof shell.run !== 'function') return null
     const rel = relOf(path, s)
     if (!rel || rel === '.' || rel.indexOf('..') === 0) return null
+    // git pathspec 通配符：rel 含 * ? [ 时 git show HEAD:* 会被解释为 glob 匹配
+    // （Windows 文件名本不允许这些字符，此处防御类 Unix 文件名场景）
+    if (/[*?[\]]/.test(rel)) return null
     try {
       const quoted = "'" + String('HEAD:' + rel).replace(/'/g, "''") + "'"
       let policy
@@ -974,21 +978,6 @@ export function apply(ctx) {
             itemCount: { type: 'integer' },
             pendingCount: { type: 'integer' },
             loading: { type: 'boolean' },
-            storeCount: { type: 'integer' },
-            stores: {
-              type: 'array',
-              items: {
-                type: 'object',
-                additionalProperties: false,
-                properties: {
-                  cwd: { type: 'string' },
-                  baselineReady: { type: 'boolean' },
-                  lastTurn: { type: 'integer' },
-                  itemCount: { type: 'integer' },
-                  pendingCount: { type: 'integer' },
-                },
-              },
-            },
             groups: {
               type: 'array',
               items: {
@@ -1032,7 +1021,7 @@ export function apply(ctx) {
           // 否则配合 revertAll 可对任意指定目录建立基线并执行文件写回。
           const agentCwd = exec && exec.agent && exec.agent.session && exec.agent.session.header ? exec.agent.session.header.cwd : null
           if (!agentCwd || canonCwd(args.cwd) !== canonCwd(agentCwd)) {
-            return { cwd: '', baselineReady: false, baselineError: '', lastError: 'drvw_debug: cwd 必须等于当前会话工作区（防止越权扫描/写回）', lastTurn: 0, rev: 0, scanCount: 0, walkFileCount: 0, truncated: false, cacheSize: 0, itemCount: 0, pendingCount: 0, loading: false, storeCount: STORES.size, stores: [], groups: [], reviewResults: [] }
+            return { cwd: '', baselineReady: false, baselineError: '', lastError: 'drvw_debug: cwd 必须等于当前会话工作区（防止越权扫描/写回）', lastTurn: 0, rev: 0, scanCount: 0, walkFileCount: 0, truncated: false, cacheSize: 0, itemCount: 0, pendingCount: 0, loading: false, groups: [], reviewResults: [] }
           }
           s = STORES.get(canonCwd(args.cwd))
           if (!s) s = getStore(args.cwd)
@@ -1047,9 +1036,20 @@ export function apply(ctx) {
           // 返回必须符合 output schema（无 actionDone 字段）；无工作区时返回完整空状态并记入 lastError
           if (!s || !s.cwd) {
             if (s) s.lastError = 'scan-skipped-no-cwd'
-            return { cwd: '', baselineReady: false, baselineError: '', lastError: s ? (s.lastError || '') : '', lastTurn: 0, rev: 0, scanCount: 0, walkFileCount: 0, truncated: false, cacheSize: 0, itemCount: 0, pendingCount: 0, loading: false, storeCount: STORES.size, stores: [], groups: [], reviewResults: [] }
+            return { cwd: '', baselineReady: false, baselineError: '', lastError: s ? (s.lastError || '') : '', lastTurn: 0, rev: 0, scanCount: 0, walkFileCount: 0, truncated: false, cacheSize: 0, itemCount: 0, pendingCount: 0, loading: false, groups: [], reviewResults: [] }
           }
-          await scan(s, sessionId || 'debug', s.lastTurn + 1)
+          // 节流 + 串行化：与 turn-stopping 共用 scanChain 队列，避免并发操作同一 store
+          // （并发会污染 fileMeta/contentCache 基线）；2 秒内不重复触发全量扫描，
+          // 防提示注入诱导高频调用造成本地 CPU/磁盘 DoS。
+          const now = Date.now()
+          if (s.lastToolScanAt && now - s.lastToolScanAt < 2000) {
+            s.lastError = 'scan-throttled: 扫描过于频繁，请稍后再试'
+          } else {
+            s.lastToolScanAt = now
+            const chain = s.scanChain.then(() => scan(s, sessionId || 'debug', s.lastTurn + 1)).catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e) })
+            s.scanChain = chain
+            await chain
+          }
         }
         // 仅保留只读动作（state/scan）；revertAll 等写回动作已移除——调试工具不得成为
         // 提示注入下的批量文件写回入口（发布安全门禁）
@@ -1066,16 +1066,8 @@ export function apply(ctx) {
         if (s) {
           for (const item of s.items.values()) if (item.status === 'pending') pendingCount++
         }
-        const stores = []
-        for (const store of STORES.values()) {
-          stores.push({
-            cwd: store.cwd,
-            baselineReady: store.baseline !== null,
-            lastTurn: store.lastTurn,
-            itemCount: store.items.size,
-            pendingCount: Array.from(store.items.values()).filter(i => i.status === 'pending').length,
-          })
-        }
+        // 不再返回 stores 数组：其中包含宿主上所有活跃工作区的绝对路径，
+        // 避免调试工具成为提示注入下的环境情报泄露口（AI 需要时自有 fs 工具可查）
         return {
           cwd: s ? s.cwd || '' : '',
           baselineReady: s ? s.baseline !== null : false,
@@ -1090,8 +1082,6 @@ export function apply(ctx) {
           itemCount: s ? s.items.size : 0,
           pendingCount,
           loading: s ? (s.scanning || s.baselineLoading) : false,
-          storeCount: STORES.size,
-          stores,
           groups,
           reviewResults,
         }
@@ -1164,5 +1154,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.15），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.16），webServer 路由:', ROUTE)
 }
