@@ -816,6 +816,16 @@ export function apply(ctx) {
           if (req.method !== 'POST') return sendJson(res, 405, { ok: false, message: 'method not allowed' })
           const body = await readBody(req)
           const action = body && body.action
+          // 写/危险操作校验请求来源：浏览器跨站请求会携带 Origin 头（不可伪造），
+          // 必须与 Host 同源才放行——挡住恶意网页静默触发 revert / openExternal / saveEditorConfig 的 CSRF。
+          // 无 Origin 头（GUI 同源 fetch、本地客户端）直接放行：本地进程本就有完整文件权限，不构成额外威胁。
+          if (action === 'review' || action === 'reviewAll' || action === 'reviewSession' || action === 'reviewGroup' || action === 'openExternal' || action === 'saveEditorConfig') {
+            const origin = req.headers && req.headers.origin
+            const host = req.headers && req.headers.host
+            if (origin && !(host && (origin === 'http://' + host || origin === 'https://' + host))) {
+              return sendJson(res, 403, { ok: false, message: 'forbidden origin' })
+            }
+          }
           const args = body && body.args
           const result = await handleAction(action, args)
           sendJson(res, 200, result)
@@ -1042,5 +1052,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.10），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.11），webServer 路由:', ROUTE)
 }

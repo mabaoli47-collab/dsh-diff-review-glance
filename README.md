@@ -70,6 +70,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 - **大工作区截断（可配置）**：遍历达到 `maxFiles`（默认 20000）上限时停止，`getState` 返回 `truncated: true`，dock 会显示带当前上限的警示；基线预读上限 `primeMaxFiles`（默认 6000）/ `primeMaxChars`（默认 48MB）也可在 设置 → Diff 审阅插件 调整。注意：上限设得过大可能显著增加内存占用与扫描耗时。
 - **临时原始文件**：打开外部 diff 时，原始内容会以 `dsh-dr-tmp-orig-*` 前缀写入工作区的 `.dsh-dr-tmp-orig/` 子目录（`walkWorkspace` 会跳过该目录，不会污染检测）。它们不会被自动删除，建议把 `.dsh-dr-tmp-orig/` 加入 `.gitignore` 或手动清理。
 - **外部编辑器权限**：「其他打开方式」以完全沙箱访问（`danger-full-access`）启动外部编辑器进程——仅在你主动点击时发生，用于让 GUI 应用正常运行。
+- **本地路由写操作校验来源**：`/dsh-diff-review` 的写/危险操作（撤销、全部保留、打开外部编辑器、保存配置）校验请求 Origin：带跨站 Origin 的请求被拒绝（防浏览器 CSRF 静默触发），同源请求与无 Origin 的本地客户端不受影响。
 - **会话标题依赖 dsh 生成**：会话组标签优先显示 dsh 会话标题（`session/title` 事件）；新会话首回合尚未生成标题时显示会话短 id 占位，回合结束后自动更新。
 
 ## 开发
