@@ -1,6 +1,8 @@
 // dsh-diff-review host half (formal plugin)
 // 从动态插件 v5.5 固化：harness.handle → webServer 路由，defineTool/registerTool → ctx.tools.register
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 export const name = 'dsh-diff-review'
 // 只声明根组合顶层可见的服务；shell/sandboxPolicy 是 scoped/可选服务，用 ctx.get 惰性读取
@@ -222,6 +224,14 @@ export function apply(ctx) {
     return { stats: { adds, dels }, hunks }
   }
 
+  // 敏感文件默认排除：凭据/密钥类文件不纳入基线对比——不读入内存缓存、不产生 diff、
+  // 不会因 revert/redo 触碰。默认排除 .env*、私钥/证书、credentials.* / secrets.* 等。
+  function isSensitiveFile(name) {
+    return /^\.env($|\.)/i.test(name)
+      || /\.(pem|key|p12|pfx|crt)$/i.test(name)
+      || /^(credentials|secrets)(\..*)?$/i.test(name)
+      || /(^|\.)config\.local(\..*)?$/i.test(name)
+  }
   // 边界校验：解析后的真实路径（targetKey，可能经过软链接解析）必须位于工作区根目录内，
   // 防止工作区内的 symlink/junction 指向外部敏感目录（如 ~/.ssh）时被纳入对比甚至被 revert 篡改
   function withinRoot(root, targetKey) {
@@ -252,6 +262,7 @@ export function apply(ctx) {
           stack.push({ path: e.target.displayPath, depth: cur.depth + 1 })
         } else if (e.type === 'file') {
           if (e.name.indexOf('dsh-dr-tmp-') === 0) continue
+          if (isSensitiveFile(e.name)) continue // 凭据/密钥类文件不纳入对比
           let ver = e.version
           if (ver === undefined) {
             try {
@@ -560,28 +571,30 @@ export function apply(ctx) {
   }
 
   async function writeTempOriginal(s, item) {
-    // 用与 cwd 一致的分隔符（Windows \，其他 /），避免跨平台在父目录生成怪文件；
-    // 临时文件统一写入工作区根目录下的 .dsh-dr-tmp-orig/ 子目录（writeText 会自动创建父目录），
-    // 不再散落在根目录，便于一次性忽略/清理；
-    // 临时名含 turn + 路径 hash，避免不同目录同名文件互相覆盖。
+    // 临时文件名含 turn + 路径 hash，避免不同目录同名文件互相覆盖。
+    // 安全策略：优先写入系统临时目录（OS 自动清理、不污染工作区、不会进入 git）；
+    // 若宿主沙箱不允许写系统临时目录，则回退到工作区 .dsh-dr-tmp-orig/（writeText 自动建父目录）。
     const sep = String(s.cwd).indexOf('\\') >= 0 ? '\\' : '/'
     const normFile = String(item.file).replace(/\\/g, '/')
     const base = normFile.split('/').pop() || 'file'
     let hash = 0
     for (let i = 0; i < normFile.length; i++) hash = ((hash << 5) - hash + normFile.charCodeAt(i)) | 0
     const name = 'dsh-dr-tmp-orig-' + (item.turn != null ? item.turn + '-' : '') + (hash >>> 0).toString(36) + '-' + base
-    const tempPath = String(s.cwd).replace(/[\\/]$/, '') + sep + '.dsh-dr-tmp-orig' + sep + name
-    try {
-      const target = await fs.resolve(tempPath)
-      let policy
-      if (sandboxPolicy && typeof sandboxPolicy.resolve === 'function') {
-        try { policy = sandboxPolicy.resolve({ session: s.session }) } catch (e) { policy = undefined }
-      }
-      await fs.writeText(target, item.original, undefined, undefined, policy)
-      return tempPath
-    } catch (e) {
-      return null
+    const candidates = []
+    try { candidates.push(join(tmpdir(), 'dsh-dr-tmp-orig', name)) } catch (e) { /* tmpdir 不可用则跳过 */ }
+    candidates.push(String(s.cwd).replace(/[\\/]$/, '') + sep + '.dsh-dr-tmp-orig' + sep + name)
+    for (const tempPath of candidates) {
+      try {
+        const target = await fs.resolve(tempPath)
+        let policy
+        if (sandboxPolicy && typeof sandboxPolicy.resolve === 'function') {
+          try { policy = sandboxPolicy.resolve({ session: s.session }) } catch (e) { policy = undefined }
+        }
+        await fs.writeText(target, item.original, undefined, undefined, policy)
+        return tempPath
+      } catch (e) { /* 沙箱拒绝或 IO 失败：尝试下一个候选 */ }
     }
+    return null
   }
 
   // ---- 业务动作分发（替代动态 harness.handle） ----
@@ -961,7 +974,13 @@ export function apply(ctx) {
           s = registerSession(exec.agent, null)
         }
         if (args && typeof args.cwd === 'string') {
-          // STORES 的键是 canonCwd 归一化后的路径，直接查原始 cwd 会 miss（getStore 兜底会复用已有桶，但先 canon 更干净）
+          // 安全边界（发布 gate）：调试工具不得把插件的文件读取/写回能力扩展到任意目录。
+          // cwd 参数必须等于当前调用者（agent 会话）的工作区，否则直接拒绝——
+          // 否则配合 revertAll 可对任意指定目录建立基线并执行文件写回。
+          const agentCwd = exec && exec.agent && exec.agent.session && exec.agent.session.header ? exec.agent.session.header.cwd : null
+          if (!agentCwd || canonCwd(args.cwd) !== canonCwd(agentCwd)) {
+            return { cwd: '', baselineReady: false, baselineError: '', lastError: 'drvw_debug: cwd 必须等于当前会话工作区（防止越权扫描/写回）', lastTurn: 0, rev: 0, scanCount: 0, walkFileCount: 0, truncated: false, cacheSize: 0, itemCount: 0, pendingCount: 0, loading: false, storeCount: STORES.size, stores: [], groups: [], reviewResults: [] }
+          }
           s = STORES.get(canonCwd(args.cwd))
           if (!s) s = getStore(args.cwd)
         }
@@ -1092,5 +1111,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.12），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.13），webServer 路由:', ROUTE)
 }

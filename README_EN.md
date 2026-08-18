@@ -64,11 +64,22 @@ Values are stored in `~/.dsh/settings.yaml` under the `dsh-diff-review` namespac
 - **In-place changes only**: new files are cached but never turned into review items; a version change is what produces a diff.
 - **Transport**: the host exposes JSON APIs over a `webServer` route; the client calls them with `fetch`. The client reads `sessionId` from the slot's standard props and the host maps `sessionId → cwd` to locate the workspace bucket, so even a pure GUI workspace switch refreshes correctly; after a page refresh the session id is re-injected and recognition recovers automatically without losing the workspace.
 
+## Permissions
+
+This plugin is a **high-privilege local development tool**; please understand its actual capabilities before installing:
+
+- **Reads current workspace file content**: to build a file-version baseline and detect changes, the plugin walks and pre-reads workspace text (sensitive files are excluded by default — `.env*`, `*.pem` / `*.key` / `*.p12` / `*.pfx`, `credentials.*`, `secrets.*`, `config.local.*` — and never enter the comparison or the cache);
+- **Writes workspace files back**: "revert / redo" restores files to their pre-review versions (with version-conflict detection — a file modified externally is refused rather than overwritten);
+- **Launches external processes**: "Open with..." starts the editor **you configured** (VS Code / VS2022) with full sandbox access (`danger-full-access`) — only on your explicit click;
+- **Local HTTP API**: `/dsh-diff-review` is reachable only on the loopback interface; write actions validate the request source (blocking browser CSRF and DNS rebinding).
+
+The plugin **never uploads any data** — all communication is local browser ↔ host traffic.
+
 ## Known limitations
 
 - **Deletions / renames are not tracked**: only in-place modifications are reviewed. A deleted file cannot produce a review item (and cannot be reverted); a rename is seen as "old path deleted + new path added", neither of which enters review scope.
 - **Huge-workspace truncation (configurable)**: walking stops at the `maxFiles` limit (default 20000); `getState` reports `truncated: true` and the dock shows a warning carrying the current limit. The baseline pre-read caps `primeMaxFiles` (default 6000) / `primeMaxChars` (default 48 MB) are also adjustable in Settings → Diff Review Plugin. Note that raising the caps too far can noticeably increase memory usage and scan time.
-- **Temp originals**: opening an external diff writes the original content into the workspace's `.dsh-dr-tmp-orig/` subdirectory with a `dsh-dr-tmp-orig-*` prefix (`walkWorkspace` skips that directory, so it never pollutes detection). They are not auto-deleted; add `.dsh-dr-tmp-orig/` to `.gitignore` or clean them up manually.
+- **Temp originals**: opening an external diff writes the original content with a `dsh-dr-tmp-orig-*` prefix into the **system temp directory** (OS-managed cleanup; never pollutes the workspace or git). If the host sandbox forbids writing the system temp dir, it falls back to the workspace `.dsh-dr-tmp-orig/` subdirectory (add it to `.gitignore` in that case).
 - **External editor permissions**: "Open with..." launches the external editor process with full sandbox access (`danger-full-access`) — this happens only on your explicit click, so GUI applications can run normally.
 - **Origin check on local route writes**: write/dangerous actions on `/dsh-diff-review` (revert, keep-all, open external editor, save config) validate the request `Origin`: cross-site origins are rejected (blocking browser-CSRF-triggered side effects), while same-origin requests and Origin-less local clients are unaffected.
 - **Loopback Host allowlist + reads checked too**: every request (including `getState`/`getItem`) requires the `Host` header to be `localhost`/`127.0.0.1`/`[::1]` (or equal to the server's actual listening address) — this blocks DNS-rebinding attacks that would otherwise bypass the Origin check and silently read workspace file information.
