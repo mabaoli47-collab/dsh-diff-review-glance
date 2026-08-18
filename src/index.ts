@@ -19,7 +19,7 @@ export function apply(ctx) {
   const sandboxPolicy = ctx.get('sandboxPolicy')
   const settings = ctx.get('settings')
 
-  const IGNORE_DIRS = new Set(['node_modules', '.git', '.hg', '.svn', '.next', '.nuxt', '.venv', 'venv', '__pycache__', '.cache', '.turbo', 'dist', 'build', 'out', 'coverage', 'target', '.idea', '.vscode', '.pytest_cache', '.mypy_cache', '.dsh-dr-tmp-orig', '.ssh', '.aws', '.gnupg', '.kube'])
+  const IGNORE_DIRS = new Set(['node_modules', '.git', '.hg', '.svn', '.next', '.nuxt', '.venv', 'venv', '__pycache__', '.cache', '.turbo', 'dist', 'build', 'out', 'coverage', 'target', '.idea', '.vscode', '.pytest_cache', '.mypy_cache', '.dsh-dr-tmp-orig', '.ssh', '.aws', '.gnupg', '.kube', '.docker', '.azure'])
   const MAX_FILES = 20000
   const MAX_DEPTH = 32
   const MAX_READ_BYTES = 2 * 1024 * 1024
@@ -238,16 +238,24 @@ export function apply(ctx) {
       || /^(id_rsa|id_dsa|id_ecdsa|id_ed25519)$/i.test(name)
       || /^\.(netrc|npmrc|git-credentials|pgpass)$/i.test(name)
       || /^htpasswd$/i.test(name)
-      || /^(secret|token|api[-_]?key|apikey)(\..*)?$/i.test(name)
+      // 收窄：无扩展名精确匹配，或仅 .json/.yaml/.yml/.txt 变体——避免误伤前端常见的 token.js/token.ts
+      || /^(secret|token|api[-_]?key|apikey)(\.(json|yaml|yml|txt))?$/i.test(name)
+      || /\.kdbx$/i.test(name)
   }
   // 边界校验：解析后的真实路径（targetKey，可能经过软链接解析）必须位于工作区根目录内，
   // 防止工作区内的 symlink/junction 指向外部敏感目录（如 ~/.ssh）时被纳入对比甚至被 revert 篡改。
-  // 统一转小写比较：canonCwd 会把 Windows 盘符路径转小写存储，而 fs.resolve 返回的
-  // targetKey 可能保留原始大写盘符（C:/...），严格比较会误判越界导致写回/扫描误杀
+  // 仅当 root 是 Windows 盘符路径时折叠大小写（canonCwd 会把盘符转小写，而 fs.resolve 返回的
+  // targetKey 可能保留大写盘符 C:/...，严格比较会误判越界）；
+  // Linux/macOS 大小写敏感文件系统保持精确比较，避免把 /a/Proj 与 /a/proj 误判为同源
   function withinRoot(root, targetKey) {
-    const r = String(root).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-    const t = String(targetKey).replace(/\\/g, '/').toLowerCase()
-    return t === r || t.indexOf(r + '/') === 0
+    const r0 = String(root).replace(/\\/g, '/').replace(/\/+$/, '')
+    const t0 = String(targetKey).replace(/\\/g, '/')
+    if (/^[a-zA-Z]:\//.test(r0)) {
+      const r = r0.toLowerCase()
+      const t = t0.toLowerCase()
+      return t === r || t.indexOf(r + '/') === 0
+    }
+    return t0 === r0 || t0.indexOf(r0 + '/') === 0
   }
   async function walkWorkspace(root) {
     const out = new Map()
@@ -349,8 +357,13 @@ export function apply(ctx) {
         ...(policy ? { sandboxPolicy: policy } : {}),
       })
       const result = await shell.run(spec)
+      // 退出码非 0 一律视为失败：git 报错（未跟踪/非仓库）走 stderr，stdout 可能是空串，
+      // 若把 '' 当"空文件原文"返回，会解锁 revert 并把用户文件清空——数据丢失红线
+      if (!result || result.exitCode !== 0) return null
       const raw = result && result.stdout
       const out = (raw && typeof raw === 'object' && typeof raw.text === 'string') ? raw.text : String(raw || '')
+      // 输出超上限（极端大文件的 HEAD 版本）：放弃补读，避免内存占用
+      if (out.length > MAX_READ_BYTES) return null
       const trimmed = out.trim()
       if (trimmed.indexOf('fatal:') === 0 || trimmed.indexOf('ERR:') === 0) return null
       return out
@@ -384,17 +397,23 @@ export function apply(ctx) {
           let current
           try { current = await fs.readText(info.target) } catch (e) { continue }
           let original = s.contentCache.get(path)
+          let gitOriginal = false
           if (original === undefined) {
             // 基线预算外（primeMaxFiles/primeMaxChars 未覆盖）或缓存缺失的文件被修改：
-            // 尝试从 Git 历史补读原始内容（只读 git show），失败则按"原始未知"处理
+            // 尝试从 Git 历史补读原始内容（只读 git show），失败则按"原始未知"处理。
+            // 注意：HEAD 内容 ≠ 会话开始前的原文（会话前可能有未提交本地修改），
+            // 该原文只用于 diff 展示，item 标记 gitOriginal 以禁止 revert（避免吞掉未提交工作）
             original = await readOriginalFromGit(s, path)
-            if (typeof original === 'string') s.contentCache.set(path, original)
+            if (typeof original === 'string') {
+              s.contentCache.set(path, original)
+              gitOriginal = true
+            }
           }
           if (original !== undefined && original === current) {
             s.contentCache.set(path, current)
             continue
           }
-          changed.push({ path, info, original: original === undefined ? null : original, current })
+          changed.push({ path, info, original: original === undefined ? null : original, current, gitOriginal })
         }
         for (const c of changed) {
           // item id 含会话维度：不同会话的同号轮次修改同一文件不得冲突
@@ -418,6 +437,7 @@ export function apply(ctx) {
             modified: c.current,
             current: c.current,
             originalMissing: c.original === null,
+            gitOriginal: !!c.gitOriginal,
             status: 'pending',
             stats: diff.stats,
             hunks: diff.hunks,
@@ -484,7 +504,9 @@ export function apply(ctx) {
       return { ok: true, status: item.status }
     }
     if (action === 'revert') {
-      if (item.original === null) return { ok: false, error: 'no-original', message: '原始内容未知，无法撤销' }
+      // gitOriginal：原文来自 git HEAD（可能 ≠ 会话开始前内容，会话前可能有未提交本地修改），
+      // 撤销会把文件回退到 HEAD 吞掉未提交工作——禁止 revert，仅允许 diff 展示
+      if (item.original === null || item.gitOriginal) return { ok: false, error: 'no-original', message: '原始内容未知（或来自 git HEAD 非会话基线），无法撤销' }
       const res = await applyFileWrite(s, item.file, item.original, item.modified)
       if (!res.ok) return res
       item.status = 'reverted'
@@ -504,11 +526,11 @@ export function apply(ctx) {
   }
 
   function itemSummary(item) {
-    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, stats: item.stats }
+    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, gitOriginal: !!item.gitOriginal, stats: item.stats }
   }
   function itemFull(item) {
     // originalMissing 时带 current，供 DiffView 显示当前文件内容；正常 diff 不传整个文件体
-    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, stats: item.stats, hunks: item.hunks, current: item.originalMissing ? item.current : undefined }
+    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, gitOriginal: !!item.gitOriginal, stats: item.stats, hunks: item.hunks, current: item.originalMissing ? item.current : undefined }
   }
 
   // ---- 标准 settings 注册（schemastery 兼容的鸭子类型 schema） ----
@@ -1023,7 +1045,7 @@ export function apply(ctx) {
         if (args && typeof args.cwd === 'string') {
           // 安全边界（发布 gate）：调试工具不得把插件的文件读取/写回能力扩展到任意目录。
           // cwd 参数必须等于当前调用者（agent 会话）的工作区，否则直接拒绝——
-          // 否则配合 revertAll 可对任意指定目录建立基线并执行文件写回。
+          // 防止对任意指定目录建立基线并执行扫描。
           const agentCwd = exec && exec.agent && exec.agent.session && exec.agent.session.header ? exec.agent.session.header.cwd : null
           if (!agentCwd || canonCwd(args.cwd) !== canonCwd(agentCwd)) {
             return { cwd: '', baselineReady: false, baselineError: '', lastError: 'drvw_debug: cwd 必须等于当前会话工作区（防止越权扫描/写回）', lastTurn: 0, rev: 0, scanCount: 0, walkFileCount: 0, truncated: false, cacheSize: 0, itemCount: 0, pendingCount: 0, loading: false, groups: [], reviewResults: [] }
@@ -1159,5 +1181,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.18），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.19），webServer 路由:', ROUTE)
 }

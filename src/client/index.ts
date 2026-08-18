@@ -315,7 +315,8 @@ function apply(ctx) {
       React.createElement('div', { className: 'dshdr-scroll' }, rows))
   }
   function actionsFor(item) {
-    if (item.originalMissing) return item.status === 'pending' ? [['keep', '保留']] : []
+    // gitOriginal：原文来自 git HEAD 非会话基线，撤销会回退到 HEAD 吞掉未提交工作——仅允许保留
+    if (item.originalMissing || item.gitOriginal) return item.status === 'pending' ? [['keep', '保留']] : []
     if (item.status === 'pending') return [['keep', '保留'], ['revert', '撤销']]
     if (item.status === 'kept') return [['revert', '撤销']]
     return [['redo', '重做']]
