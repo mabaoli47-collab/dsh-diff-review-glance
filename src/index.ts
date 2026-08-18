@@ -264,6 +264,16 @@ export function apply(ctx) {
     }
     return t0 === r0 || t0.indexOf(r0 + '/') === 0
   }
+  // 解析后真实路径的段级检查：改名的 symlink（foo.txt -> .env、notkube -> .kube）
+  // 会绕过基于 listDir 条目名的敏感/忽略判断，必须用真实路径（targetKey）重判——
+  // 路径任一目录段命中 IGNORE_DIRS（.ssh/.aws/.kube/.docker 等）即拦截
+  function realPathBlocked(targetKey) {
+    const segs = String(targetKey).replace(/\\/g, '/').split('/')
+    for (const seg of segs) {
+      if (IGNORE_DIRS.has(seg)) return true
+    }
+    return false
+  }
   async function walkWorkspace(root) {
     const out = new Map()
     const seen = new Set()
@@ -286,10 +296,14 @@ export function apply(ctx) {
         const e = entries[k]
         if (e.type === 'directory') {
           if (IGNORE_DIRS.has(e.name)) continue
-          stack.push({ path: e.target.displayPath, depth: cur.depth + 1 })
+          // 目录 symlink 改名绕过（notkube -> .kube）：resolve 后重判真实路径段
+          let dTarget
+          try { dTarget = await fs.resolve(e.target.displayPath) } catch (err) { continue }
+          if (!withinRoot(root, dTarget.targetKey)) continue
+          if (realPathBlocked(dTarget.targetKey)) continue
+          stack.push({ path: dTarget.displayPath, depth: cur.depth + 1 })
         } else if (e.type === 'file') {
           if (e.name.indexOf('dsh-dr-tmp-') === 0) continue
-          if (isSensitiveFile(e.name)) continue // 凭据/密钥类文件不纳入对比
           // 文件级 symlink/junction 越界防护：listDir 可能把指向工作区外的
           // 文件符号链接报告为 file（如 link -> /etc/passwd / ~/.ssh/id_rsa），
           // 必须重新 resolve 并用真实路径（targetKey）做 withinRoot 校验，
@@ -297,6 +311,10 @@ export function apply(ctx) {
           let fTarget
           try { fTarget = await fs.resolve(e.target.displayPath) } catch (err) { continue }
           if (!withinRoot(root, fTarget.targetKey)) continue
+          // 敏感判断移到解析后真实路径：foo.txt -> .env 之类的改名链接
+          // 用真实 basename 重判 + 真实路径段忽略检查
+          const realName = fTarget.displayPath.split('/').pop() || e.name
+          if (isSensitiveFile(realName) || realPathBlocked(fTarget.targetKey)) continue
           let ver = e.version
           if (ver === undefined) {
             try {
@@ -835,6 +853,9 @@ export function apply(ctx) {
     if (!s) return { ok: false, message: '尚无活跃工作区，无法打开' }
     const item = itemId ? s.items.get(itemId) : undefined
     if (!item) return { ok: false, message: '记录不存在（插件可能已重启）' }
+    // 会话隔离（与 getItem/review 一致）：携带 sessionId 时禁止跨会话触发写临时原文 + 启动进程
+    const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
+    if (sid && item.sessionId !== sid) return { ok: false, message: '会话不匹配，操作已拒绝' }
     if (!s.cwd) return { ok: false, message: '工作区尚未就绪' }
     try {
       let left = item.file
@@ -993,7 +1014,9 @@ export function apply(ctx) {
     const remote = req.socket && req.socket.remoteAddress
     if (remote) {
       const r = remote.toLowerCase()
-      const remoteLoop = r === '127.0.0.1' || r === '::1' || r === '::ffff:127.0.0.1'
+      // 接受整个 127.0.0.0/8 回环段（127.0.0.1、127.0.0.2…）以及 ::1：
+      // 用户把 webServer 绑到 127.0.0.2 或本机经回环段访问时不被误伤
+      const remoteLoop = r === '::1' || r === '::ffff:127.0.0.1' || r.startsWith('127.')
       if (!remoteLoop) return false
     }
     const host = req.headers && req.headers.host
@@ -1255,5 +1278,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.24），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.25），webServer 路由:', ROUTE)
 }
