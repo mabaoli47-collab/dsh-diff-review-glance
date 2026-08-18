@@ -71,6 +71,9 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 - **临时原始文件**：打开外部 diff 时，原始内容会以 `dsh-dr-tmp-orig-*` 前缀写入工作区的 `.dsh-dr-tmp-orig/` 子目录（`walkWorkspace` 会跳过该目录，不会污染检测）。它们不会被自动删除，建议把 `.dsh-dr-tmp-orig/` 加入 `.gitignore` 或手动清理。
 - **外部编辑器权限**：「其他打开方式」以完全沙箱访问（`danger-full-access`）启动外部编辑器进程——仅在你主动点击时发生，用于让 GUI 应用正常运行。
 - **本地路由写操作校验来源**：`/dsh-diff-review` 的写/危险操作（撤销、全部保留、打开外部编辑器、保存配置）校验请求 Origin：带跨站 Origin 的请求被拒绝（防浏览器 CSRF 静默触发），同源请求与无 Origin 的本地客户端不受影响。
+- **Host 回环白名单 + 读接口也校验**：所有请求（含 `getState`/`getItem`）校验 Host 必须为 `localhost`/`127.0.0.1`/`[::1]`（或与服务器实际监听地址一致）——防 DNS 重绑定攻击绕过 Origin 校验、静默读取工作区文件信息。
+- **路径边界防护**：扫描与写回均校验解析后的真实路径（含软链接解析）必须位于工作区根目录内，越界的 symlink/junction 不纳入对比、revert/redo 拒绝写回。
+- **编辑器路径控制字符校验**：`saveEditorConfig` 拒绝含换行/控制字符的路径（路径最终进入 PowerShell 命令，杜绝脚本注入面）。
 - **会话标题依赖 dsh 生成**：会话组标签优先显示 dsh 会话标题（`session/title` 事件）；新会话首回合尚未生成标题时显示会话短 id 占位，回合结束后自动更新。
 
 ## 开发

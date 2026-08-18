@@ -222,6 +222,13 @@ export function apply(ctx) {
     return { stats: { adds, dels }, hunks }
   }
 
+  // 边界校验：解析后的真实路径（targetKey，可能经过软链接解析）必须位于工作区根目录内，
+  // 防止工作区内的 symlink/junction 指向外部敏感目录（如 ~/.ssh）时被纳入对比甚至被 revert 篡改
+  function withinRoot(root, targetKey) {
+    const r = String(root).replace(/\\/g, '/').replace(/\/+$/, '')
+    const t = String(targetKey).replace(/\\/g, '/')
+    return t === r || t.indexOf(r + '/') === 0
+  }
   async function walkWorkspace(root) {
     const out = new Map()
     const seen = new Set()
@@ -233,6 +240,7 @@ export function apply(ctx) {
       if (cur.depth > MAX_DEPTH) continue
       let target
       try { target = await fs.resolve(cur.path) } catch (e) { continue }
+      if (!withinRoot(root, target.targetKey)) continue // 软链接越界：跳过，不纳入对比
       if (seen.has(target.targetKey)) continue
       seen.add(target.targetKey)
       let entries
@@ -380,6 +388,10 @@ export function apply(ctx) {
   async function applyFileWrite(s, file, content, expectedContent) {
     try {
       const target = await fs.resolve(file)
+      // 越界防护：真实路径（含软链接解析）必须位于工作区内，否则拒绝写回
+      if (!withinRoot(s.cwd, target.targetKey)) {
+        return { ok: false, error: 'out-of-bounds', message: '文件真实路径超出工作区根目录，操作已取消' }
+      }
       const cur = await fs.readText(target)
       if (cur !== expectedContent) {
         return { ok: false, error: 'conflict', message: '文件内容已被后续修改，操作已取消' }
@@ -639,7 +651,10 @@ export function apply(ctx) {
     if (!args || typeof args !== 'object' || Array.isArray(args)) return { ok: false, message: '无效参数' }
     const patch = {}
     for (const key of ['code', 'devenv', 'vsDiffMerge']) {
-      patch[key] = typeof args[key] === 'string' ? args[key].trim() : ''
+      const raw = typeof args[key] === 'string' ? args[key] : ''
+      // 拒绝控制字符（换行等）：路径最终会进入 PowerShell 命令，杜绝脚本注入面
+      if (/[\u0000-\u001f]/.test(raw)) return { ok: false, message: key + ' 含控制字符，已拒绝' }
+      patch[key] = raw.trim()
     }
     // 数字上限项：合法正整数才写入，否则存 0（读取时回退默认）
     for (const key of ['maxFiles', 'primeMaxFiles', 'primeMaxChars']) {
@@ -807,6 +822,28 @@ export function apply(ctx) {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
     res.end(body)
   }
+  // Host 回环白名单校验：防 DNS 重绑定攻击（恶意域名解析到 127.0.0.1 时，
+  // 请求的 Host/Origin 都是 evil.com，仅靠 Origin 同源比较会被绕过）。
+  // 允许 localhost / 127.0.0.1 / [::1]，或与服务器实际监听地址（socket.localAddress）一致。
+  function hostAllowed(req) {
+    const host = req.headers && req.headers.host
+    if (!host || typeof host !== 'string') return false
+    let hostname = host
+    if (hostname.startsWith('[')) {
+      const m = hostname.match(/^\[([^\]]+)\]/)
+      hostname = m ? m[1] : hostname
+    } else {
+      hostname = hostname.split(':')[0]
+    }
+    hostname = hostname.toLowerCase()
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return true
+    const local = req.socket && req.socket.localAddress
+    if (local) {
+      const l = local.toLowerCase()
+      if (hostname === l || (l.startsWith('::ffff:') && hostname === l.slice(7))) return true
+    }
+    return false
+  }
   if (webServer && typeof webServer.register === 'function') {
     ctx.effect(() => webServer.register({
       kind: 'exact',
@@ -814,11 +851,14 @@ export function apply(ctx) {
       async handler(req, res) {
         try {
           if (req.method !== 'POST') return sendJson(res, 405, { ok: false, message: 'method not allowed' })
+          // 所有请求（含读操作）校验 Host 回环白名单：读接口泄露工作区路径与 diff 内容，
+          // DNS 重绑定下恶意站点可同源读取，必须一并拦截
+          if (!hostAllowed(req)) return sendJson(res, 403, { ok: false, message: 'forbidden host' })
           const body = await readBody(req)
           const action = body && body.action
-          // 写/危险操作校验请求来源：浏览器跨站请求会携带 Origin 头（不可伪造），
+          // 写/危险操作再校验 Origin 同源：浏览器跨站请求携带 Origin 头（不可伪造），
           // 必须与 Host 同源才放行——挡住恶意网页静默触发 revert / openExternal / saveEditorConfig 的 CSRF。
-          // 无 Origin 头（GUI 同源 fetch、本地客户端）直接放行：本地进程本就有完整文件权限，不构成额外威胁。
+          // 无 Origin 头（GUI 同源 fetch、本地客户端）放行：本地进程本就有完整文件权限，不构成额外威胁。
           if (action === 'review' || action === 'reviewAll' || action === 'reviewSession' || action === 'reviewGroup' || action === 'openExternal' || action === 'saveEditorConfig') {
             const origin = req.headers && req.headers.origin
             const host = req.headers && req.headers.host
@@ -1052,5 +1092,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.11），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.12），webServer 路由:', ROUTE)
 }
