@@ -2,7 +2,7 @@
 // 从动态插件 v5.5 固化：harness.handle → webServer 路由，defineTool/registerTool → ctx.tools.register
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { chmod } from 'node:fs/promises'
 
@@ -60,10 +60,11 @@ export function apply(ctx) {
       scanChain: Promise.resolve(),
     }
   }
-  // 规范化 cwd：统一分隔符 + 去尾斜杠 + Windows 盘符路径整体小写
-  // （Windows 文件系统大小写不敏感，C:/Foo 与 c:/foo 是同一目录）
+  // 规范化 cwd：统一分隔符 + 解析 . 与 ..（posix.normalize）+ 去尾斜杠 + Windows 盘符路径整体小写。
+  // 不解析 . / .. 会导致 pickStore/relOf/withinRoot 的字符串比较因 C:/proj/./sub 与
+  // C:/proj/sub 不一致而失效（状态桶错乱、relOf 返回绝对路径、Git pathspec 异常）
   function canonCwd(cwd) {
-    let c = String(cwd).replace(/\\/g, '/')
+    let c = posix.normalize(String(cwd).replace(/\\/g, '/'))
     while (c.length > 1 && c.endsWith('/')) c = c.slice(0, -1)
     if (/^[a-zA-Z]:\//.test(c)) c = c.toLowerCase()
     return c
@@ -655,7 +656,10 @@ export function apply(ctx) {
     // 则回退到工作区 .dsh-dr-tmp-orig/（writeText 自动建父目录）。
     const sep = String(s.cwd).indexOf('\\') >= 0 ? '\\' : '/'
     const normFile = String(item.file).replace(/\\/g, '/')
-    const base = normFile.split('/').pop() || 'file'
+    // 防御性 sanitize：pop() 本身只取最后一段文件名（不含分隔符/..），但若文件名
+    // 恰好是 . 或 ..（理论保留名）则回退 'file'，杜绝任何路径穿越的可能
+    let base = normFile.split('/').pop() || 'file'
+    if (base === '.' || base === '..' || base === '') base = 'file'
     let hash = 0
     for (let i = 0; i < normFile.length; i++) hash = ((hash << 5) - hash + normFile.charCodeAt(i)) | 0
     let rand = ''
@@ -747,10 +751,11 @@ export function apply(ctx) {
     const patch = {}
     for (const key of ['code', 'devenv', 'vsDiffMerge']) {
       const raw = typeof args[key] === 'string' ? args[key] : ''
-      // 拒绝控制字符（换行等）+ PowerShell 双引号串危险字符（$、反引号、双引号）：
-      // 路径最终会进入 PowerShell 命令，杜绝脚本注入面（纵深防御，正常 Windows 路径不含这些字符）
+      // 拒绝控制字符（换行等）+ Shell 元字符（PowerShell 的 $ 反引号 双引号，以及
+      // bash/sh 的 ' ; | & ( ) ）：路径最终会进入 shell 命令，杜绝跨平台脚本注入面
+      // （纵深防御；正常编辑器路径不含这些字符）
       if (/[\u0000-\u001f]/.test(raw)) return { ok: false, message: key + ' 含控制字符，已拒绝' }
-      if (/[$`"]/.test(raw)) return { ok: false, message: key + ' 含 PowerShell 危险字符，已拒绝' }
+      if (/[$`"';&|()]/.test(raw)) return { ok: false, message: key + ' 含 Shell 危险字符，已拒绝' }
       patch[key] = raw.trim()
     }
     // 数字上限项：合法正整数才写入，否则存 0（读取时回退默认）
@@ -1053,7 +1058,9 @@ export function apply(ctx) {
           s = STORES.get(canonCwd(args.cwd))
           if (!s) s = getStore(args.cwd)
         }
-        if (!s && active) s = active
+        // 不提供 cwd 时仅使用当前调用者会话的工作区（registerSession 已登记）；
+        // 不再回退到 active（最后活跃工作区）——否则提示注入下 AI 不带参数调用
+        // 会拿到其他工作区的内部状态，违背工作区隔离原则
         if (s) {
           ensureBaseline(s)
           if (s.baseline) { try { await s.baseline } catch (e) {} }
@@ -1181,5 +1188,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.19），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.20），webServer 路由:', ROUTE)
 }
