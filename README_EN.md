@@ -68,12 +68,12 @@ Values are stored in `~/.dsh/settings.yaml` under the `dsh-diff-review` namespac
 
 This plugin is a **high-privilege local development tool**; please understand its actual capabilities before installing:
 
-- **Reads current workspace file content**: to build a file-version baseline and detect changes, the plugin walks and pre-reads workspace text (sensitive files are excluded by default — `.env*`, `*.pem` / `*.key` / `*.p12` / `*.pfx`, `credentials.*`, `secrets.*`, `config.local.*` — and never enter the comparison or the cache);
+- **Reads current workspace file content**: to build a file-version baseline and detect changes, the plugin walks and pre-reads workspace text (sensitive files are excluded by default — `.env*`, `*.pem` / `*.key` / `*.p12` / `*.pfx` / `*.crt` / `*.keystore`, `credentials.*`, `secrets.*`, `config.local.*`, SSH private keys (`id_rsa`/`id_ed25519` and friends, no extension), `.netrc` / `.npmrc` / `.git-credentials` / `.pgpass` / `htpasswd`, and the `.ssh/` `.aws/` `.gnupg/` `.kube/` directories — **a best-effort list, not a security guarantee**);
 - **Writes workspace files back**: "revert / redo" restores files to their pre-review versions (with version-conflict detection — a file modified externally is refused rather than overwritten);
 - **Launches external processes**: "Open with..." starts the editor **you configured** (VS Code / VS2022) with full sandbox access (`danger-full-access`) — only on your explicit click;
-- **Local HTTP API**: `/dsh-diff-review` is reachable only on the loopback interface; write actions validate the request source (blocking browser CSRF and DNS rebinding).
+- **Local HTTP API**: `/dsh-diff-review`'s trust boundary is **the host's listening address** (loopback `127.0.0.1` by default); write actions validate the request source (blocking browser CSRF and DNS rebinding) and every request validates the Host header. **If you bind dsh's webServer to a non-loopback address (e.g. `0.0.0.0`), this plugin's local API is exposed along with it — assess the risk yourself.**
 
-The plugin **never uploads any data** — all communication is local browser ↔ host traffic.
+**Threat model**: the plugin's trust boundary is the local loopback plus the host's listening address. The plugin **never uploads any data** — all communication is local browser ↔ host traffic.
 
 ## Known limitations
 

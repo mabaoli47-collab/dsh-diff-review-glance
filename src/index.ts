@@ -3,6 +3,8 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { chmod } from 'node:fs/promises'
 
 export const name = 'dsh-diff-review'
 // 只声明根组合顶层可见的服务；shell/sandboxPolicy 是 scoped/可选服务，用 ctx.get 惰性读取
@@ -17,7 +19,7 @@ export function apply(ctx) {
   const sandboxPolicy = ctx.get('sandboxPolicy')
   const settings = ctx.get('settings')
 
-  const IGNORE_DIRS = new Set(['node_modules', '.git', '.hg', '.svn', '.next', '.nuxt', '.venv', 'venv', '__pycache__', '.cache', '.turbo', 'dist', 'build', 'out', 'coverage', 'target', '.idea', '.vscode', '.pytest_cache', '.mypy_cache', '.dsh-dr-tmp-orig'])
+  const IGNORE_DIRS = new Set(['node_modules', '.git', '.hg', '.svn', '.next', '.nuxt', '.venv', 'venv', '__pycache__', '.cache', '.turbo', 'dist', 'build', 'out', 'coverage', 'target', '.idea', '.vscode', '.pytest_cache', '.mypy_cache', '.dsh-dr-tmp-orig', '.ssh', '.aws', '.gnupg', '.kube'])
   const MAX_FILES = 20000
   const MAX_DEPTH = 32
   const MAX_READ_BYTES = 2 * 1024 * 1024
@@ -225,12 +227,17 @@ export function apply(ctx) {
   }
 
   // 敏感文件默认排除：凭据/密钥类文件不纳入基线对比——不读入内存缓存、不产生 diff、
-  // 不会因 revert/redo 触碰。默认排除 .env*、私钥/证书、credentials.* / secrets.* 等。
+  // 不会因 revert/redo 触碰。默认排除 .env*、私钥/证书、credentials.* / secrets.*、
+  // SSH 私钥（无扩展名）、.netrc/.npmrc/.git-credentials/.pgpass/htpasswd 等。
+  // 注意：这是 best-effort 名单，不是安全保证（见 README 权限说明）。
   function isSensitiveFile(name) {
     return /^\.env($|\.)/i.test(name)
-      || /\.(pem|key|p12|pfx|crt)$/i.test(name)
+      || /\.(pem|key|p12|pfx|crt|keystore)$/i.test(name)
       || /^(credentials|secrets)(\..*)?$/i.test(name)
       || /(^|\.)config\.local(\..*)?$/i.test(name)
+      || /^(id_rsa|id_dsa|id_ecdsa|id_ed25519)$/i.test(name)
+      || /^\.(netrc|npmrc|git-credentials|pgpass)$/i.test(name)
+      || /^htpasswd$/i.test(name)
   }
   // 边界校验：解析后的真实路径（targetKey，可能经过软链接解析）必须位于工作区根目录内，
   // 防止工作区内的 symlink/junction 指向外部敏感目录（如 ~/.ssh）时被纳入对比甚至被 revert 篡改
@@ -589,11 +596,12 @@ export function apply(ctx) {
         + "if (-not $d) { Write-Output 'MISSING:VS2022'; exit 1 }; "
         + "if ($d -is [string]) { $dPath = $d } else { $dPath = $d.Source }"
       const dExpr = cfg.devenv
-        ? '$dPath = ' + q(cfg.devenv) + '; if (-not (Test-Path $dPath)) { Write-Output \"ERR:配置的 devenv 路径不存在: ' + cfg.devenv + '\"; exit 1 }'
+        // 报错消息不含配置值：PowerShell 双引号字符串会执行 $()/反引号转义，插值用户输入可被注入
+        ? '$dPath = ' + q(cfg.devenv) + '; if (-not (Test-Path $dPath)) { Write-Output \"ERR:配置的 devenv 路径不存在\"; exit 1 }'
         : probeDevenv
       if (diff) {
         const dm = cfg.vsDiffMerge
-          ? '$dm = ' + q(cfg.vsDiffMerge) + '; if (Test-Path $dm) { ' + launch('$dm', pDm) + ' } else { Write-Output \"ERR:配置的 vsDiffMerge 路径不存在: ' + cfg.vsDiffMerge + '\"; exit 1 }'
+          ? '$dm = ' + q(cfg.vsDiffMerge) + '; if (Test-Path $dm) { ' + launch('$dm', pDm) + ' } else { Write-Output \"ERR:配置的 vsDiffMerge 路径不存在\"; exit 1 }'
           : "$dm = (Split-Path $dPath) + '\\CommonExtensions\\Microsoft\\TeamFoundation\\Team Explorer\\vsDiffMerge.exe'; if (Test-Path $dm) { " + launch('$dm', pDm) + ' } else { ' + launch('$dPath', pDevenvDiff) + ' }'
         return dExpr + '; ' + dm
       }
@@ -603,21 +611,25 @@ export function apply(ctx) {
       "$c = Get-Command code -ErrorAction SilentlyContinue; if (-not $c) { Write-Output 'MISSING:VSCode'; exit 1 }; "
       + "$exe = $c.Source; if ($exe -like '*\\bin\\code.cmd') { $exe = $exe.Substring(0, $exe.Length - '\\bin\\code.cmd'.Length) + '\\Code.exe' }; if (-not (Test-Path $exe)) { $exe = $c.Source }"
     const exeExpr = cfg.code
-      ? '$exe = ' + q(cfg.code) + '; if (-not (Test-Path $exe)) { Write-Output \"ERR:配置的 VS Code 路径不存在: ' + cfg.code + '\"; exit 1 }'
+      ? '$exe = ' + q(cfg.code) + '; if (-not (Test-Path $exe)) { Write-Output \"ERR:配置的 VS Code 路径不存在\"; exit 1 }'
       : probeCode
     return exeExpr + '; ' + launch('$exe', diff ? pCodeDiff : pOpen)
   }
 
   async function writeTempOriginal(s, item) {
-    // 临时文件名含 turn + 路径 hash，避免不同目录同名文件互相覆盖。
-    // 安全策略：优先写入系统临时目录（OS 自动清理、不污染工作区、不会进入 git）；
-    // 若宿主沙箱不允许写系统临时目录，则回退到工作区 .dsh-dr-tmp-orig/（writeText 自动建父目录）。
+    // 临时文件名含 turn + 路径 hash + 随机段（防可预测文件名枚举）+ 原文件名，
+    // 避免不同目录同名文件互相覆盖。
+    // 安全策略：优先写入系统临时目录（OS 自动清理、不污染工作区、不会进入 git），
+    // 写后 chmod 600 限制同机其他用户读取；若宿主沙箱不允许写系统临时目录，
+    // 则回退到工作区 .dsh-dr-tmp-orig/（writeText 自动建父目录）。
     const sep = String(s.cwd).indexOf('\\') >= 0 ? '\\' : '/'
     const normFile = String(item.file).replace(/\\/g, '/')
     const base = normFile.split('/').pop() || 'file'
     let hash = 0
     for (let i = 0; i < normFile.length; i++) hash = ((hash << 5) - hash + normFile.charCodeAt(i)) | 0
-    const name = 'dsh-dr-tmp-orig-' + (item.turn != null ? item.turn + '-' : '') + (hash >>> 0).toString(36) + '-' + base
+    let rand = ''
+    try { rand = '-' + randomBytes(4).toString('hex') } catch (e) { /* 随机源不可用时省略 */ }
+    const name = 'dsh-dr-tmp-orig-' + (item.turn != null ? item.turn + '-' : '') + (hash >>> 0).toString(36) + rand + '-' + base
     const candidates = []
     try { candidates.push(join(tmpdir(), 'dsh-dr-tmp-orig', name)) } catch (e) { /* tmpdir 不可用则跳过 */ }
     candidates.push(String(s.cwd).replace(/[\\/]$/, '') + sep + '.dsh-dr-tmp-orig' + sep + name)
@@ -629,6 +641,7 @@ export function apply(ctx) {
           try { policy = sandboxPolicy.resolve({ session: s.session }) } catch (e) { policy = undefined }
         }
         await fs.writeText(target, item.original, undefined, undefined, policy)
+        try { await chmod(target.targetKey, 0o600) } catch (e) { /* 权限位设置失败不影响功能 */ }
         return tempPath
       } catch (e) { /* 沙箱拒绝或 IO 失败：尝试下一个候选 */ }
     }
@@ -703,8 +716,10 @@ export function apply(ctx) {
     const patch = {}
     for (const key of ['code', 'devenv', 'vsDiffMerge']) {
       const raw = typeof args[key] === 'string' ? args[key] : ''
-      // 拒绝控制字符（换行等）：路径最终会进入 PowerShell 命令，杜绝脚本注入面
+      // 拒绝控制字符（换行等）+ PowerShell 双引号串危险字符（$、反引号、双引号）：
+      // 路径最终会进入 PowerShell 命令，杜绝脚本注入面（纵深防御，正常 Windows 路径不含这些字符）
       if (/[\u0000-\u001f]/.test(raw)) return { ok: false, message: key + ' 含控制字符，已拒绝' }
+      if (/[$`"]/.test(raw)) return { ok: false, message: key + ' 含 PowerShell 危险字符，已拒绝' }
       patch[key] = raw.trim()
     }
     // 数字上限项：合法正整数才写入，否则存 0（读取时回退默认）
@@ -931,13 +946,13 @@ export function apply(ctx) {
   if (tools && typeof tools.register === 'function') {
     const debugTool = defineTool({
       name: 'drvw_debug',
-      description: '读取「对话修改审阅」插件（drvw）的内部状态并支持调试动作：action=state 返回状态（默认，可指定 cwd 参数查看特定工作区）；action=scan 立即执行一次扫描（自动引导基线，使用 lastTurn+1 作为回合号）；action=revertAll 撤销全部待审阅项。仅调试用。',
+      description: '读取「对话修改审阅」插件（drvw）的内部状态并支持调试动作：action=state 返回状态（默认，可指定 cwd 参数查看特定工作区）；action=scan 立即执行一次扫描（自动引导基线，使用 lastTurn+1 作为回合号）。仅只读调试动作；cwd 必须等于当前会话工作区。',
       // ParameterSchemaSpec：扁平属性映射（defineTool 转成 JSON Schema object 根）
       parameters: {
         action: {
           type: 'string',
-          enum: ['state', 'scan', 'revertAll'],
-          description: '调试动作：state（默认）查看状态；scan 立即扫描；revertAll 撤销全部待审阅项',
+          enum: ['state', 'scan'],
+          description: '调试动作：state（默认）查看状态；scan 立即扫描（只读）',
         },
         cwd: { type: 'string', description: '目标工作区路径；缺省使用最近活动工作区' },
       },
@@ -1036,14 +1051,9 @@ export function apply(ctx) {
           }
           await scan(s, sessionId || 'debug', s.lastTurn + 1)
         }
+        // 仅保留只读动作（state/scan）；revertAll 等写回动作已移除——调试工具不得成为
+        // 提示注入下的批量文件写回入口（发布安全门禁）
         const reviewResults = []
-        if (action === 'revertAll' && s) {
-          for (const item of Array.from(s.items.values())) {
-            if (item.status !== 'pending') continue
-            const r = await reviewItem(s, item.id, 'revert')
-            reviewResults.push({ id: item.id, ok: r.ok === true, status: r.status || '', message: r.message || '' })
-          }
-        }
         const groups = []
         if (s) {
           for (const g of s.groups.values()) {
@@ -1154,5 +1164,5 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.14），webServer 路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.3.15），webServer 路由:', ROUTE)
 }
