@@ -60,3 +60,8 @@ ${clientBody}
 `
 writeFileSync(join(lib, 'client.js'), banner)
 console.log('[build] lib/client.js')
+
+// ---- type declarations (hand-written, stable public surface) ----
+mkdirSync(join(lib, 'types'), { recursive: true })
+writeFileSync(join(lib, 'types', 'index.d.ts'), readSource(join(root, 'src', 'types', 'index.d.ts')))
+console.log('[build] lib/types/index.d.ts')

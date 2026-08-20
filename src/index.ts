@@ -1712,5 +1712,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.16.0），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.16.1），typert 唯一通道（无 HTTP 路由）')
 }

@@ -112,12 +112,15 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 ## 开发
 
 ```bash
-npm run build   # 从 src/ 生成 lib/
-npm test        # vitest 单元测试（纯函数：路径/边界/敏感名单/diff 算法，20 用例）
+npm run build      # 从 src/ 生成 lib/（含 lib/types/index.d.ts 类型声明）
+npm test           # vitest 单元测试（纯函数：路径/边界/敏感名单/diff/gitignore，39 用例）
+npm run verify:pack # 打包产物门禁：files 清单 / 语法 / client banner / host 导出形状 / 版本一致性
+npm pack --dry-run  # 完整发布链（prepack = build + test + verify:pack）
 ```
 
 - `src/index.ts` 为宿主半（ESM，`name`/`inject`/`apply`），`src/host/util.ts` 为纯函数工具（可单测），`src/host/typert.ts` 为 typert 描述符（wire 契约）
 - `src/client/index.ts` 为客户端半（打包为 `window.__ModuleLoader__.load` 格式），`scripts/build.mjs` 将 host 多文件与 client 单文件转至 `lib/`
+- `src/types/index.d.ts` 为手写的公开面类型声明（运行时源码为无注解的纯 JS），build 复制至 `lib/types/`；`scripts/verify-pack.mjs` 为发布门禁（对应 rich-file-review 的 `test:pack`）
 
 ## 版本历史
 
@@ -139,6 +142,7 @@ npm test        # vitest 单元测试（纯函数：路径/边界/敏感名单/d
 | v0.15.1 | **匹配结果缓存（R1 性能项）**：同一文件跨 walk/live/审查的重复 gitignore 正则匹配改为文件级结果缓存（TTL 30s，规则集变化即清空）——消除 live 兜底全量/回合末全量的重复匹配成本；规则上限保持 2000（不降，避免功能损失） |
 | v0.15.2 | **评审修复（P2）**：`giCachedUpTo` 缓存查询前置（命中零 FS 开销）；`cachedGitignoreRules` 接受外部 version（walk 省 stat）；dry-run scan 输出 `changedCount` 且跳过 diff 计算；单模式通配符上限 64（闭合指数回溯 ReDoS）；失效矩阵补全（extraLayers/saveEditorConfig 清缓存、版本相同不清匹配缓存）、getItem null 出口、空闲释放清缓存 |
 | v0.16.0 | **功能性迭代**：跳过文件可观测性（`skippedCount`，dock 提示"N 个文件因过大/不可读未纳入"）；新文件跟踪（设置 `trackNewFiles`，默认关，仅展示不可撤销）；冲突拒绝引导语；gitOriginal 降级提示；非 Windows 禁用 live 选项（前置提示）；「清理已处理」按钮（清除 kept/reverted 记录，手动清理出口） |
+| v0.16.1 | **工程化（对比 rich-file-review 补齐）**：TypeScript 类型声明（`lib/types/index.d.ts`，exports 带 types 字段）；打包产物门禁 `verify:pack`（files 清单/语法/banner/导出形状/版本一致性，对应对方 `test:pack`）；prepack 全链 = build + test + verify |
 
 ## 许可
 
