@@ -20,6 +20,12 @@ DeepSeek Harness（dsh）Web 的**逐段对话文件修改审阅**插件：每�
 
 ## 安装
 
+### 通过 GitHub
+
+```bash
+dsh plugin --profile web add github:mabaoli47-collab/dsh-diff-review
+```
+
 ### 通过 npm（发布后）
 
 ```bash
@@ -34,7 +40,7 @@ git clone <repo-url> %TEMP%\dsh-diff-review
 dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 ```
 
-安装完成后**重启 dsh**（旧实例持有旧组合，需重启加载新组合）。
+安装完成后**重启 dsh**（旧实例持有旧组合，需重启加载新组合）。升级插件版本后请**硬刷新浏览器（Ctrl+F5）或使用无痕窗口**——浏览器可能缓存旧 client bundle，导致 client 与 host 版本不一致而显示「未能连接插件宿主」。
 
 ## 使用
 
@@ -70,7 +76,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 - **会话隔离模型**：操作范围 = **当前 agent 所在工作区**（typert agent 由运行时注入、不可伪造，pickStore 按会话定位工作区 store）。工作区内跨会话的正式/live 项均可读取与操作（dock 按会话分组的全工作区审阅由此成立；「本会话全部保留」经 `targetSessionId` 显式指定目标会话，须与当前 agent 同工作区）；**跨工作区完全隔离**。实时预览桶（live）为工作区级数据（`sessionId='(live)'`）。
 - **检测时机**：`agent/turn-stopping`（回合结束）触发全量 `walkWorkspace` 版本对比（默认，跨平台）；`detectMode=live` 时额外用 `fs.watch` 递归监听工作区，事件去抖 600ms 后做**单文件/全量增量比对**（watcher 只当触发器，正确性仍以版本对比为准，回合末全量扫描保留为兜底——watcher 丢事件只会延迟不会漏检；另有 8 秒事件静默自动全量兜底），实时变更挂 `store.live` 预览桶，**开启 `liveRevert` 后可在进行中撤销**（`applyFileWrite` 版本冲突保护：AI 已改过则拒绝；撤销成功后该项冻结、文件恢复会话基线，回合扫描因 `original===current` 天然不重复产生正式项），回合结束正式扫描后清空并入正式审阅项
 - **仅跟踪修改**：新文件只缓存不产生审阅项（符合「仅包括修改」）；文件版本变化才生成 diff
-- **通信（v0.4 起）**：host 通过**官方 typert RPC**（`dsh-typert-protocol`）暴露服务——调用方 `agent` 由运行时注入，**会话绑定不可伪造**；client 经 `ctx.remote` 挂载描述符后调用命名空间方法。**typert 为唯一通道**（v0.8 起移除过渡 HTTP 路由），无 HTTP 攻击面。
+- **通信（v0.4 起）**：host 通过**官方 typert RPC**（`dsh-typert-protocol`）暴露服务——调用方 `agent` 由运行时注入，**会话绑定不可伪造**；client 经 `ctx.remote` 挂载描述符后调用命名空间方法。**typert 为唯一通道**（v0.8 起移除过渡 HTTP 路由），无 HTTP 攻击面。**调用约定（v0.16.3/0.16.4 修复后固化）**：descriptor 的 result/参数必须 strict codec（宿主 client loader 拒绝 src-json）；lookup 参数（agent）计入调用 arity，client 需传 `(undefined, request)` 占位。
 
 ## 权限说明
 
@@ -133,7 +139,8 @@ npm pack --dry-run  # 完整发布链（prepack = build + test + verify:pack）
 | v0.8.0 | **移除过渡 HTTP 路由与 client fetch 回退**——typert 为唯一通信通道，无 HTTP 攻击面（CSRF/DNS 重绑定等配套防护随之删除） |
 | v0.9.0 | **内存自动回收**：空闲工作区（10 分钟无活动）释放 fs.watch 句柄与定时器；`contentCache` 超 40000 条淘汰最旧；git 补读拒绝含 `$`/反引号的文件名（纵深防御） |
 | v0.10.0 | **健壮性**：实时检查挂入 scanChain 串行队列（不与回合扫描并发）；`removeLivePath` 改精确路径匹配（POSIX 大小写敏感）；外部 diff 临时文件 2 小时后自动清理；live 块 UI 标注「工作区级」 |
-| v0.11.0 | **敏感加强（.gitignore）**：工作区根 `.gitignore` 中忽略的文件不读入基线、不产生审阅项、不可撤销（纯函数匹配器 + 单测；仅支持根 `.gitignore`） || v0.11.1 | `.gitignore` 排除改为设置项 **`respectGitignore`**（默认开启，可关闭） |
+| v0.11.0 | **敏感加强（.gitignore）**：工作区根 `.gitignore` 中忽略的文件不读入基线、不产生审阅项、不可撤销（纯函数匹配器 + 单测；仅支持根 `.gitignore`） |
+| v0.11.1 | `.gitignore` 排除改为设置项 **`respectGitignore`**（默认开启，可关闭） |
 | v0.12.0 | **评审修复**：跨会话操作统一为「当前工作区」语义（reviewSession 支持 `targetSessionId` 同工作区校验；getItem 返回错误对象不再卡「加载 diff…」）；live 静默兜底改**指数退避**（空闲不再每 5 秒全量扫描）；`agentSessionId` 显式取值；调试扫描独立会话 + 不推进基线；基线失败可重试；state 比对补 `truncated`/`limits`；渲染期副作用移入 effect；页面隐藏暂停轮询；清理死代码/版本文案 |
 | v0.13.0 | **嵌套 .gitignore + 自定义忽略文件**：遍历读取每一层 `.gitignore`（各管各的子树、深层规则优先、父层规则也作用于嵌套仓库内部——比 git 更保守）；新增设置 `extraIgnoreFiles` 支持工作区外自定义忽略文件（基础层，纯只读匹配） |
 | v0.14.0 | **评审修复**：`drvw_debug` scan 改**完全 dry-run**（不再覆盖 contentCache 导致真实审阅项被静默跳过、不再残留幽灵项）；.gitignore 逐行容错（坏行丢弃其余生效）+ 规则条数上限 5000 + `**/` 根级匹配；revert/redo 前补忽略校验；.gitignore 规则层 TTL 缓存 + 从 entries 判断存在性（消除无效 IO）；baselineError 清除、`_fallbackMs` 复位、keepSession 错误展示 |
@@ -143,6 +150,7 @@ npm pack --dry-run  # 完整发布链（prepack = build + test + verify:pack）
 | v0.15.2 | **评审修复（P2）**：`giCachedUpTo` 缓存查询前置（命中零 FS 开销）；`cachedGitignoreRules` 接受外部 version（walk 省 stat）；dry-run scan 输出 `changedCount` 且跳过 diff 计算；单模式通配符上限 64（闭合指数回溯 ReDoS）；失效矩阵补全（extraLayers/saveEditorConfig 清缓存、版本相同不清匹配缓存）、getItem null 出口、空闲释放清缓存 |
 | v0.16.0 | **功能性迭代**：跳过文件可观测性（`skippedCount`，dock 提示"N 个文件因过大/不可读未纳入"）；新文件跟踪（设置 `trackNewFiles`，默认关，仅展示不可撤销）；冲突拒绝引导语；gitOriginal 降级提示；非 Windows 禁用 live 选项（前置提示）；「清理已处理」按钮（清除 kept/reverted 记录，手动清理出口） |
 | v0.16.1 | **工程化（对比 rich-file-review 补齐）**：TypeScript 类型声明（`lib/types/index.d.ts`，exports 带 types 字段）；打包产物门禁 `verify:pack`（files 清单/语法/banner/导出形状/版本一致性，对应对方 `test:pack`）；prepack 全链 = build + test + verify |
+| v0.16.2-0.16.4 | **typert 传输修复（首次端到端跑通）**：v0.4 起 client 用 src-json codec + 单参数调用，被宿主 client loader 静默拒绝——v0.4.x 的 HTTP fetch 回退一直掩盖该缺陷，v0.8 删回退后暴露。修复：client 打印真实错误（不再静默）；descriptor 改用 strict codec（host `z.any()` / client 鸭子 zod schema，透传语义不变）；调用改为 `(undefined, request)` 占位（宿主把 lookup 参数计入 arity）。**升级旧版本后务必硬刷新/无痕窗口验证** |
 
 ## 许可
 

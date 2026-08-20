@@ -20,6 +20,12 @@ Per-turn **file-change diff review** for DeepSeek Harness (dsh) Web. After each 
 
 ## Install
 
+### From GitHub
+
+```bash
+dsh plugin --profile web add github:mabaoli47-collab/dsh-diff-review
+```
+
 ### From npm (once published)
 
 ```bash
@@ -34,7 +40,7 @@ git clone <repo-url> %TEMP%\dsh-diff-review
 dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 ```
 
-**Restart dsh after installing** — a running instance keeps its old composition until restarted.
+**Restart dsh after installing** — a running instance keeps its old composition until restarted. After upgrading the plugin, **hard-refresh the browser (Ctrl+F5) or use an incognito window** — the browser may cache the old client bundle, and a stale client can fail to reach the new host (shows "cannot connect to plugin host").
 
 ## Usage
 
@@ -70,7 +76,7 @@ Values are stored in `~/.dsh/settings.yaml` under the `dsh-diff-review` namespac
 - **Session isolation model**: the operation scope is the **current agent's workspace** (the typert `agent` is injected by the runtime and unforgeable; `pickStore` locates the workspace store by session). Formal and live items of other sessions **within the same workspace** can be read and acted on (this is what makes the whole-workspace, per-session-grouped dock review work; "keep all in session" passes an explicit `targetSessionId` that must share the current agent's workspace). **Cross-workspace access is fully isolated.** The realtime preview bucket (live) is workspace-level data (`sessionId='(live)'`).
 - **Scan timing**: `agent/turn-stopping` triggers a full `walkWorkspace` version comparison at the end of each turn (default, cross-platform). With `detectMode=live` the workspace is additionally watched with recursive `fs.watch`; events are debounced (600ms) — filenames accumulate into a set for per-file checks (falling back to a full walk on directory-level events or >30 paths), correctness still comes from version comparison, the end-of-turn full scan remains as a fallback, and an 8s silent-watcher fallback runs a full check when no event arrives. Realtime changes land in the `store.live` preview bucket and, **when `liveRevert` is enabled, can be reverted during the conversation** (`applyFileWrite` version-conflict protection refuses if the file was changed again; after a successful revert the item freezes and the file equals the session baseline, so the end-of-turn scan naturally skips it and no duplicate formal item is created); they are folded into the formal items when the turn ends.
 - **In-place changes only**: new files are cached but never turned into review items; a version change is what produces a diff.
-- **Transport (v0.4+)**: the host exposes services through the official **typert RPC** (`dsh-typert-protocol`) — the calling `agent` is injected by the runtime, so session binding cannot be forged; the client mounts the descriptors via `ctx.remote` and calls the namespace methods. **Typert is the only channel** (the transitional `webServer` HTTP route was removed in v0.8), so there is no HTTP attack surface.
+- **Transport (v0.4+)**: the host exposes services through the official **typert RPC** (`dsh-typert-protocol`) — the calling `agent` is injected by the runtime, so session binding cannot be forged; the client mounts the descriptors via `ctx.remote` and calls the namespace methods. **Typert is the only channel** (the transitional `webServer` HTTP route was removed in v0.8), so there is no HTTP attack surface. **Call convention (fixed and pinned in v0.16.3/0.16.4)**: descriptor result/parameters must use strict codecs (the host client loader rejects src-json); the lookup (agent) parameter counts toward the method arity, so the client calls `(undefined, request)` as a placeholder.
 
 ## Permissions
 
@@ -141,6 +147,7 @@ npm test        # vitest unit tests (pure functions: path/boundary/sensitive-lis
 | v0.15.2 | **Review fixes (P2)**: `giCachedUpTo` checks the result cache first (zero FS cost on hit); `cachedGitignoreRules` accepts an external version (walk skips stat); dry-run scan reports `changedCount` and skips diff computation; per-pattern wildcard cap of 64 (closes the exponential-backtracking ReDoS); invalidation matrix completed (extraLayers/saveEditorConfig clear caches, unchanged version no longer clears the match cache), getItem null exit, idle release clears caches |
 | v0.16.0 | **Functional iteration**: skipped-file observability (`skippedCount`, dock shows "N files not included: too large / unreadable"); new-file tracking (setting `trackNewFiles`, off by default, keep-only); conflict-refusal guidance; gitOriginal degradation hint; live option disabled up front on non-Windows; "clear reviewed" button (removes kept/reverted records as a manual cleanup outlet) |
 | v0.16.1 | **Engineering (mirroring rich-file-review)**: TypeScript type declarations (`lib/types/index.d.ts`, exports gain a types field); `verify:pack` artifact gate (files manifest / syntax / banner / export shape / version consistency, the counterpart of its `test:pack`); prepack chain = build + test + verify |
+| v0.16.2-0.16.4 | **Typert transport fix (first end-to-end working RPC)**: since v0.4 the client used src-json codecs and single-argument calls, which the host client loader silently rejected — the v0.4.x HTTP fetch fallback masked it until v0.8 removed the fallback. Fixes: client logs the real error instead of swallowing it; descriptors use strict codecs (host `z.any()` / client duck-typed zod schema, same passthrough semantics); calls pass `(undefined, request)` as a placeholder (the host counts the lookup parameter in the arity). **After upgrading, hard-refresh / use an incognito window** |
 
 ## License
 
