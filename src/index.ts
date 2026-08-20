@@ -165,6 +165,8 @@ export function apply(ctx) {
     const rules = await loadGitignoreAt(join(absDirPath, '.gitignore'))
     const val = rules || []
     if (s._giCache.size > 20000) s._giCache.clear() // 缓存兜底上限
+    // 规则集变化：清空匹配结果缓存（避免旧规则的结果继续命中）
+    if (s._giMatchCache) s._giMatchCache.clear()
     s._giCache.set(key, { rules: val, version: String(ver), at: now })
     return val
   }
@@ -200,6 +202,24 @@ export function apply(ctx) {
       if (own.length > 0) layers.push({ base, rules: own })
     }
     return layers
+  }
+  // ---- 匹配结果缓存（v0.15.1，R1 性能项）----
+  // 同一 relPath 在同一规则集下结果恒定，而 live 兜底全量 / 回合末全量 / 审查校验会反复
+  // 匹配同一批路径——结果缓存（TTL 30s，与规则缓存同失效策略）直接消除重复正则匹配。
+  // 规则集变化（cachedGitignoreRules 刷新/版本变化）时清空。纯加速，不改变判定结果。
+  function giCachedWithLayers(s, relPath, layers, isDir) {
+    if (!s._giMatchCache) s._giMatchCache = new Map()
+    const key = (isDir ? 'd:' : 'f:') + String(relPath)
+    const hit = s._giMatchCache.get(key)
+    if (hit && Date.now() - hit.at < 30000) return hit.v
+    const v = gitignoreMatchLayered(layers, relPath, isDir)
+    if (s._giMatchCache.size > 500000) s._giMatchCache.clear() // 缓存兜底上限
+    s._giMatchCache.set(key, { v, at: Date.now() })
+    return v
+  }
+  // 低频路径（checkLiveFile / reviewItem）：自行向上收集规则层后套结果缓存
+  async function giCachedUpTo(s, relPath, isDir) {
+    return giCachedWithLayers(s, relPath, await gitignoreLayersUpTo(s, relPath), isDir)
   }
   async function walkWorkspace(s) {
     const root = s.cwd
@@ -251,7 +271,7 @@ export function apply(ctx) {
           if (!withinRoot(root, dTarget.targetKey)) continue
           if (realPathBlocked(dTarget.targetKey, root)) continue
           // gitignore 目录命中：整个目录不深入（用当前目录的规则链判断）
-          if (gitignoreMatchLayered(layers, relOf(dTarget.displayPath, { cwd: root }), true)) continue
+          if (giCachedWithLayers(s, relOf(dTarget.displayPath, { cwd: root }), layers, true)) continue
           stack.push({ path: dTarget.displayPath, depth: cur.depth + 1, parentLayers: layers })
         } else if (e.type === 'file') {
           if (e.name.indexOf('dsh-dr-tmp-') === 0) continue
@@ -267,7 +287,7 @@ export function apply(ctx) {
           const realName = fTarget.displayPath.split('/').pop() || e.name
           if (isSensitiveFile(realName) || realPathBlocked(fTarget.targetKey, root)) continue
           // gitignore 文件命中：不读入基线、不产生审阅项（分层规则链）
-          if (gitignoreMatchLayered(layers, relOf(fTarget.displayPath, { cwd: root }), false)) continue
+          if (giCachedWithLayers(s, relOf(fTarget.displayPath, { cwd: root }), layers, false)) continue
           let ver = e.version
           if (ver === undefined) {
             try {
@@ -505,9 +525,9 @@ export function apply(ctx) {
     const realName = target.displayPath.split('/').pop() || ''
     if (isSensitiveFile(realName) || realPathBlocked(target.targetKey, s.cwd)) return false
     // gitignore 加强（分层 + 用户自配外部文件）：被忽略的文件不进实时预览（已在 live 桶则移除）；设置可关闭。
-    // 与 walkWorkspace 的层级语义等价（gitignoreLayersUpTo 收集 extra 基础层 + 根→文件所在目录逐层），
+    // 与 walkWorkspace 的层级语义等价（giCachedUpTo 收集 extra 基础层 + 根→文件所在目录逐层，套结果缓存），
     // 保证"全量扫描排除、单文件事件也排除"的一致行为（3.2 审查项：两条路径同一判定结果）。
-    if (readConfig().respectGitignore && gitignoreMatchLayered(await gitignoreLayersUpTo(s, relOf(target.displayPath, s)), relOf(target.displayPath, s), false)) {
+    if (readConfig().respectGitignore && giCachedUpTo(s, relOf(target.displayPath, s), false)) {
       s.live.delete(target.displayPath)
       return false
     }
@@ -800,7 +820,7 @@ export function apply(ctx) {
       // 被忽略的文件不产生审阅项、也不应被撤销/重做触碰（与"忽略=不跟踪"语义一致）
       if (readConfig().respectGitignore) {
         const rel = relOf(item.file, s)
-        if (gitignoreMatchLayered(await gitignoreLayersUpTo(s, rel), rel, false)) {
+        if (giCachedUpTo(s, rel, false)) {
           return { ok: false, error: 'gitignored', message: '该文件现已被 .gitignore 忽略，禁止撤销/重做' }
         }
       }
@@ -1590,5 +1610,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.15.0），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.15.1），typert 唯一通道（无 HTTP 路由）')
 }
