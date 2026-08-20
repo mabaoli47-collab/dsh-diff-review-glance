@@ -230,13 +230,14 @@ function apply(ctx) {
     '.dshdr-switch { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; font-size: 11px; color: rgba(128,128,128,0.95); cursor: pointer; user-select: none; white-space: nowrap; }\n' +
     '.dshdr-switch input { accent-color: #2ea043; cursor: pointer; }\n' +
     '.dshdr-note { font-size: 11px; color: rgba(128,128,128,0.9); }\n' +
-    '.dshdr-cols { display: grid; grid-template-columns: 3.4em max-content 3.4em max-content; border-bottom: 1px solid rgba(128,128,128,0.3); }\n' +
+    '.dshdr-cols { display: grid; grid-template-columns: 3.4em 1fr 3.4em 1fr; border-bottom: 1px solid rgba(128,128,128,0.3); }\n' +
     '.dshdr-cols > div { padding: 3px 8px; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: rgba(128,128,128,0.9); }\n' +
-    // 横向滚动：文本列按内容宽度（max-content），长行撑开行宽，容器 overflow:auto 出现横向滚动条
+    // 左右两栏 1fr 等宽；每个文本单元格 min-width:0 + overflow-x:auto ——
+    // 原内容栏与修改后栏各自横向滚动查看长行（不截断、不撑开整表）
     '.dshdr-scroll { max-height: 360px; overflow: auto; }\n' +
-    '.dshdr-row { display: grid; grid-template-columns: 3.4em max-content 3.4em max-content; }\n' +
+    '.dshdr-row { display: grid; grid-template-columns: 3.4em 1fr 3.4em 1fr; }\n' +
     '.dshdr-row .dshdr-ln { padding: 0 6px; text-align: right; color: rgba(128,128,128,0.8); background: rgba(128,128,128,0.08); user-select: none; }\n' +
-    '.dshdr-row .dshdr-txt { padding: 0 8px; white-space: pre; }\n' +
+    '.dshdr-row .dshdr-txt { padding: 0 8px; white-space: pre; min-width: 0; overflow-x: auto; }\n' +
     '.dshdr-row.dshdr-ctx .dshdr-txt { background: transparent; }\n' +
     '.dshdr-collapsed { text-align: center; font-size: 11px; color: rgba(128,128,128,0.8); padding: 1px 0; border-top: 1px dashed rgba(128,128,128,0.3); border-bottom: 1px dashed rgba(128,128,128,0.3); background: rgba(128,128,128,0.06); }\n' +
     '.dshdr-txt-del { background: rgba(248,81,73,0.18); }\n' +
