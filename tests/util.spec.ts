@@ -1,7 +1,7 @@
 // Unit tests for the pure host utilities (src/host/util.ts).
 // 覆盖路径规范化、边界校验、敏感文件名单与 diff 算法等纯函数。
 import { describe, expect, it } from 'vitest'
-import { canonCwd, relOf, withinRoot, isSensitiveFile, realPathBlocked, turnKey, shortSessionId, splitLines, computeDiff } from '../src/host/util.js'
+import { canonCwd, relOf, withinRoot, isSensitiveFile, realPathBlocked, turnKey, shortSessionId, splitLines, computeDiff, parseGitignore, gitignoreMatch } from '../src/host/util.js'
 
 describe('canonCwd', () => {
   it('normalizes separators and trailing slashes', () => {
@@ -115,5 +115,43 @@ describe('splitLines / computeDiff', () => {
     expect(d.stats.adds).toBe(2000)
     // 常规规模不标记退化
     expect(computeDiff('a\nb\nc\n', 'a\nb x\nc\n').degraded).toBe(false)
+  })
+})
+
+describe('gitignore matching', () => {
+  it('ignores basename patterns at any depth', () => {
+    const rules = parseGitignore('*.log\n')
+    expect(gitignoreMatch(rules, 'a/b/x.log')).toBe(true)
+    expect(gitignoreMatch(rules, 'x.log')).toBe(true)
+    expect(gitignoreMatch(rules, 'a/b/x.txt')).toBe(false)
+  })
+  it('ignores directory patterns including their contents', () => {
+    const rules = parseGitignore('dist/\n')
+    expect(gitignoreMatch(rules, 'dist', true)).toBe(true)
+    expect(gitignoreMatch(rules, 'dist/a/b.js', false)).toBe(true)
+    expect(gitignoreMatch(rules, 'src/a.js', false)).toBe(false)
+    // 目录模式不匹配同名文件本体
+    expect(gitignoreMatch(rules, 'dist', false)).toBe(false)
+  })
+  it('anchored patterns match only the repo root', () => {
+    const rules = parseGitignore('/build\n')
+    expect(gitignoreMatch(rules, 'build')).toBe(true)
+    expect(gitignoreMatch(rules, 'a/build')).toBe(false)
+  })
+  it('negation re-includes files', () => {
+    const rules = parseGitignore('*.log\n!keep.log\n')
+    expect(gitignoreMatch(rules, 'x.log')).toBe(true)
+    expect(gitignoreMatch(rules, 'keep.log')).toBe(false)
+  })
+  it('slash patterns match relative paths and their children', () => {
+    const rules = parseGitignore('foo/bar\n')
+    expect(gitignoreMatch(rules, 'foo/bar')).toBe(true)
+    expect(gitignoreMatch(rules, 'foo/bar/baz.ts')).toBe(true)
+    expect(gitignoreMatch(rules, 'foo/x.ts')).toBe(false)
+  })
+  it('ignores comments and blank lines', () => {
+    const rules = parseGitignore('# comment\n\n*.tmp\n')
+    expect(rules.length).toBe(1)
+    expect(gitignoreMatch(rules, 'a.tmp')).toBe(true)
   })
 })

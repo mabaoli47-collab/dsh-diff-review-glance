@@ -217,3 +217,82 @@ export function computeDiff(original, current) {
   })
   return { stats: { adds, dels }, hunks, degraded }
 }
+
+// ---- .gitignore 匹配（敏感文件加强防线）----
+// 解析工作区根 .gitignore：用户显式声明不跟踪的文件，插件不读入基线、不产生审阅项、
+// 不可撤销。覆盖常见语法：注释/空行、! 取反、尾部 /（目录）、前导 /（锚定根）、
+// * ? ** [abc] 通配、\ 转义、无斜杠模式（任意层级 basename）。不支持：嵌套 .gitignore、
+// 尾部空格转义（简化：尾部空白一律去除）。
+function escapeReChar(c) {
+  return /[.*+?^${}()|[\]\\]/.test(c) ? '\\' + c : c
+}
+/** 把一条 gitignore 模式编译为正则片段（不包含边界锚定） */
+function gitignorePatternToSource(pattern) {
+  let src = ''
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i]
+    if (ch === '*') {
+      if (pattern[i + 1] === '*') { i++; src += '.*' }
+      else src += '[^/]*'
+    } else if (ch === '?') {
+      src += '[^/]'
+    } else if (ch === '[') {
+      const close = pattern.indexOf(']', i + 1)
+      if (close === -1) { src += '\\['; continue }
+      src += pattern.slice(i, close + 1)
+      i = close
+    } else if (ch === '\\') {
+      i++
+      if (i < pattern.length) src += escapeReChar(pattern[i])
+    } else {
+      src += escapeReChar(ch)
+    }
+  }
+  return src
+}
+/** 解析 .gitignore 文本 → 规则列表（顺序敏感：后匹配的规则优先，! 取反） */
+export function parseGitignore(text) {
+  const rules = []
+  const lines = String(text).split(/\r?\n/)
+  for (let raw of lines) {
+    raw = raw.replace(/\s+$/, '')
+    if (!raw || raw[0] === '#') continue
+    let negate = false
+    if (raw[0] === '!') { negate = true; raw = raw.slice(1) }
+    if (!raw) continue
+    let dirOnly = false
+    if (raw.endsWith('/')) { dirOnly = true; raw = raw.slice(0, -1) }
+    let anchored = false
+    if (raw.startsWith('/')) { anchored = true; raw = raw.slice(1) }
+    if (!raw) continue
+    const hasSlash = raw.indexOf('/') !== -1
+    const body = gitignorePatternToSource(raw)
+    // 无斜杠模式：匹配任意层级同名段（(?:^|/)name$）；含斜杠/锚定：相对根前缀匹配（^a/b($|/)）
+    const re = hasSlash || anchored ? new RegExp('^' + body + '(?:$|/)') : new RegExp('(?:^|/)' + body + '$')
+    rules.push({ negate, dirOnly, re })
+  }
+  return rules
+}
+/**
+ * 判断相对路径（/ 分隔）是否被 gitignore 忽略。
+ * 返回 true=应忽略。isDir 标识该路径是目录（目录模式的尾部 / 规则可匹配目录本体）。
+ * 对路径的每个前缀（目录）与全路径逐一测试规则，后出现的规则覆盖先出现的（! 取反）。
+ */
+export function gitignoreMatch(rules, relPath, isDir) {
+  if (!rules || rules.length === 0) return false
+  const segments = String(relPath).split('/')
+  const candidates = []
+  for (let i = 1; i <= segments.length; i++) candidates.push(segments.slice(0, i).join('/'))
+  const last = candidates.length - 1 // 全路径（目录本体或文件）下标
+  let ignored = false
+  for (const rule of rules) {
+    let hit = false
+    for (let ci = 0; ci < candidates.length; ci++) {
+      // 目录模式（尾部 /）不匹配文件本体（但可匹配其目录前缀）
+      if (rule.dirOnly && ci === last && !isDir) continue
+      if (rule.re.test(candidates[ci])) { hit = true; break }
+    }
+    if (hit) ignored = !rule.negate
+  }
+  return ignored
+}

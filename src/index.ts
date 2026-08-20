@@ -8,7 +8,7 @@ import { dirname, join, posix } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { chmod, unlink } from 'node:fs/promises'
 import { watch } from 'node:fs'
-import { canonCwd, IGNORE_DIRS, norm, relOf, isSensitiveFile, withinRoot, realPathBlocked, shortSessionId, turnKey, splitLines, computeDiff } from './host/util.js'
+import { canonCwd, IGNORE_DIRS, norm, relOf, isSensitiveFile, withinRoot, realPathBlocked, shortSessionId, turnKey, splitLines, computeDiff, parseGitignore, gitignoreMatch } from './host/util.js'
 import { hostContribution } from './host/typert.js'
 
 export const name = 'dsh-diff-review'
@@ -129,11 +129,22 @@ export function apply(ctx) {
   // targetKey 可能保留大写盘符 C:/...，严格比较会误判越界）；
   // Linux/macOS 大小写敏感文件系统保持精确比较，避免把 /a/Proj 与 /a/proj 误判为同源
   // 实现见 src/host/util.ts（withinRoot / realPathBlocked）
+  // 工作区根 .gitignore 读取（v0.11 敏感加强防线）：用户显式声明不跟踪的文件
+  // 不读入基线、不产生审阅项、不可撤销。仅支持根 .gitignore（嵌套暂不支持）。
+  // 失败（不存在/不可读）返回空规则——不阻断扫描。
+  async function loadGitignoreFor(root) {
+    try {
+      const t = await fs.resolve(join(root, '.gitignore'))
+      const text = await fs.readText(t)
+      return parseGitignore(text)
+    } catch (e) { return [] }
+  }
   async function walkWorkspace(root) {
     const out = new Map()
     const seen = new Set()
     const stack = [{ path: root, depth: 0 }]
     const maxFiles = readConfig().maxFiles // 可配置上限（settings → maxFiles）
+    const gitRules = await loadGitignoreFor(root) // 根 .gitignore（敏感加强）
     let truncated = false
     while (stack.length > 0 && !truncated) {
       const cur = stack.pop()
@@ -156,6 +167,8 @@ export function apply(ctx) {
           try { dTarget = await fs.resolve(e.target.displayPath) } catch (err) { continue }
           if (!withinRoot(root, dTarget.targetKey)) continue
           if (realPathBlocked(dTarget.targetKey)) continue
+          // gitignore 目录命中：整个目录不深入
+          if (gitignoreMatch(gitRules, relOf(dTarget.displayPath, { cwd: root }), true)) continue
           stack.push({ path: dTarget.displayPath, depth: cur.depth + 1 })
         } else if (e.type === 'file') {
           if (e.name.indexOf('dsh-dr-tmp-') === 0) continue
@@ -170,6 +183,8 @@ export function apply(ctx) {
           // 用真实 basename 重判 + 真实路径段忽略检查
           const realName = fTarget.displayPath.split('/').pop() || e.name
           if (isSensitiveFile(realName) || realPathBlocked(fTarget.targetKey)) continue
+          // gitignore 文件命中：不读入基线、不产生审阅项
+          if (gitignoreMatch(gitRules, relOf(fTarget.displayPath, { cwd: root }), false)) continue
           let ver = e.version
           if (ver === undefined) {
             try {
@@ -383,6 +398,11 @@ export function apply(ctx) {
     if (!withinRoot(s.cwd, target.targetKey)) return false
     const realName = target.displayPath.split('/').pop() || ''
     if (isSensitiveFile(realName) || realPathBlocked(target.targetKey)) return false
+    // gitignore 加强：用户显式忽略的文件不进实时预览（已在 live 桶则移除）
+    if (gitignoreMatch(await loadGitignoreFor(s.cwd), relOf(target.displayPath, s), false)) {
+      s.live.delete(target.displayPath)
+      return false
+    }
     let info
     try { info = await fs.stat(target) } catch (e) { return removeLivePath(s, rawPath) }
     const path = target.displayPath
@@ -1401,5 +1421,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.10.0），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.11.0），typert 唯一通道（无 HTTP 路由）')
 }
