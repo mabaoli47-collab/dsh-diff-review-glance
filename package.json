@@ -1,6 +1,6 @@
 {
   "name": "dsh-diff-review",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Per-turn file-change diff review for DeepSeek Harness web: multi-workspace multi-baseline detection, per-session review dock, collapsible turn-tail panels, external editor diff (VS Code / VS2022), and standard settings integration. v0.4: typert RPC transport; v0.5: optional realtime watcher preview (live mode).",
   "type": "module",
   "keywords": [

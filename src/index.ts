@@ -6,7 +6,7 @@ import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { tmpdir } from 'node:os'
 import { dirname, join, posix } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { chmod } from 'node:fs/promises'
+import { chmod, unlink } from 'node:fs/promises'
 import { watch } from 'node:fs'
 import { canonCwd, IGNORE_DIRS, norm, relOf, isSensitiveFile, withinRoot, realPathBlocked, shortSessionId, turnKey, splitLines, computeDiff } from './host/util.js'
 import { hostContribution } from './host/typert.js'
@@ -36,6 +36,10 @@ export function apply(ctx) {
   // contentCache 兜底上限：超限时按插入序淘汰最旧条目（防失控增长；被淘汰文件的
   // 后续 diff 退回 git 补读或"原始未知"，README 已披露）
   const CACHE_MAX_ENTRIES = 40000
+  // 外部 diff 临时文件保留时长：超过后由维护定时器删除（编辑器仍占用时删除失败被忽略）
+  const TEMP_TTL_MS = 2 * 60 * 60 * 1000
+  // 临时文件登记表：tempPath -> createdAt（用于定期清理，随 fiber 卸载清空）
+  const tempRegistry = new Map()
 
   // 多基线设计：每个工作区（cwd）一个独立状态桶
   const STORES = new Map()
@@ -315,7 +319,7 @@ export function apply(ctx) {
       if (readConfig().detectMode !== 'live') return
       const now = Date.now()
       if (now - (s._lastLiveEventAt || 0) > 8000 && now - (s._lastLiveCheckAt || 0) > 4000) {
-        runLiveCheck(s)
+        queueLiveCheck(s)
       }
     }, 5000)
   }
@@ -333,9 +337,17 @@ export function apply(ctx) {
       s._liveFull = true
     }
     if (s.watchTimer) clearTimeout(s.watchTimer)
-    s.watchTimer = setTimeout(() => { s.watchTimer = null; runLiveCheck(s) }, 600)
+    s.watchTimer = setTimeout(() => { s.watchTimer = null; queueLiveCheck(s) }, 600)
   }
-  async function runLiveCheck(s) {
+  // 实时检查统一挂到 scanChain 串行队列：与回合末 scan / drvw_debug 扫描不并发
+  // 读写 fileMeta/contentCache/live（JS 单线程下引用赋值原子、无半更新状态，
+  // 串行化主要保证语义干净：live 检查总是在上一次扫描完成之后执行）
+  function queueLiveCheck(s) {
+    s.scanChain = s.scanChain
+      .then(() => doLiveCheck(s))
+      .catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 实时检查失败', e) })
+  }
+  async function doLiveCheck(s) {
     if (!s.cwd || readConfig().detectMode !== 'live') return
     s.lastActivityAt = Date.now()
     if (s.baseline) { try { await s.baseline } catch (e) {} }
@@ -444,13 +456,17 @@ export function apply(ctx) {
     })
     return true
   }
-  // 删除事件兜底：resolve 已失败，按路径归一化匹配清理 live 项
+  // 删除事件兜底：resolve 已失败，把事件路径归一化为绝对路径后与 live 项 key 精确匹配。
+  // Windows 折叠盘符/整段大小写（fs 大小写不敏感）；POSIX 保持精确（避免误删 Foo.txt 的 live 项）
   function removeLivePath(s, rawPath) {
-    const key = norm(rawPath).toLowerCase()
+    const np = norm(rawPath)
+    const abs = /^[a-zA-Z]:\//.test(np) || posix.isAbsolute(np) ? np : norm(join(s.cwd, np))
+    const isWin = String(process.platform) === 'win32'
+    const target = isWin ? abs.toLowerCase() : abs
     let removed = false
     for (const k of Array.from(s.live.keys())) {
-      const nk = norm(k).toLowerCase()
-      if (nk === key || nk.endsWith('/' + key)) { s.live.delete(k); removed = true }
+      const nk = isWin ? norm(k).toLowerCase() : norm(k)
+      if (nk === target) { s.live.delete(k); removed = true }
     }
     return removed
   }
@@ -470,13 +486,15 @@ export function apply(ctx) {
       if (st.liveTimer) { clearInterval(st.liveTimer); st.liveTimer = null }
       if (st.watcher) { try { st.watcher.close() } catch (e) { /* 忽略 */ } st.watcher = null }
     }
+    tempRegistry.clear()
   })
 
   // ---- 空闲资源回收（每 60 秒维护一次，随 fiber 卸载清理）----
   // ① 空闲工作区释放 watcher 句柄与定时器（页面开着时 getState 每 2 秒刷新
   // lastActivityAt，不会误释放；页面关闭/无会话活动超过 IDLE_RELEASE_MS 才释放，
   // 重新激活时 getState 的 syncLiveWatcher/ensureLiveFallbackTimer 自动重建）；
-  // ② contentCache 超上限时按插入序淘汰最旧条目（Map 迭代序 = 插入序），兜底防失控增长。
+  // ② contentCache 超上限时按插入序淘汰最旧条目（Map 迭代序 = 插入序），兜底防失控增长；
+  // ③ 过期外部 diff 临时文件删除（编辑器仍占用时删除失败被忽略，下轮重试）。
   function maintainStores() {
     const now = Date.now()
     for (const st of STORES.values()) {
@@ -495,6 +513,12 @@ export function apply(ctx) {
           st.contentCache.delete(key)
           dropped++
         }
+      }
+    }
+    for (const [p, t] of Array.from(tempRegistry.entries())) {
+      if (now - t > TEMP_TTL_MS) {
+        tempRegistry.delete(p)
+        unlink(p).catch(() => { /* 编辑器仍占用/权限不足：忽略，下轮重试 */ })
       }
     }
   }
@@ -859,6 +883,8 @@ export function apply(ctx) {
         }
         await fs.writeText(target, item.original, undefined, undefined, policy)
         try { await chmod(target.targetKey, 0o600) } catch (e) { /* 权限位设置失败不影响功能 */ }
+        // 登记临时文件（维护定时器定期清理过期项；编辑器仍占用时删除失败会被忽略）
+        tempRegistry.set(tempPath, Date.now())
         return tempPath
       } catch (e) { /* 沙箱拒绝或 IO 失败：尝试下一个候选 */ }
     }
@@ -1375,5 +1401,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.9.0），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.10.0），typert 唯一通道（无 HTTP 路由）')
 }

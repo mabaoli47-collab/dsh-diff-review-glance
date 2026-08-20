@@ -521,7 +521,7 @@ function apply(ctx) {
       ? React.createElement('div', { className: 'dshdr-session' },
           React.createElement('div', { className: 'dshdr-session-head' },
             React.createElement('span', { className: 'dshdr-session-label' }, '进行中修改（实时预览）'),
-            React.createElement('span', { className: 'dshdr-note' }, '回合结束后并入正式审阅项')),
+            React.createElement('span', { className: 'dshdr-note' }, '工作区级 · 回合结束后并入正式审阅项')),
           React.createElement('div', { className: 'dshdr-list' },
             liveItems.map(item => React.createElement(ItemRow, { key: item.id, item, showTurn: false }))))
       : null
