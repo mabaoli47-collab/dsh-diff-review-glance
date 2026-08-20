@@ -143,26 +143,42 @@ export function apply(ctx) {
       return rules.length > 0 ? rules : null
     } catch (e) { return null }
   }
-  // .gitignore 规则层缓存（store 级，TTL 30 秒 + 版本校验）：gitignore 极少变化，避免每次
-  // 扫描/实时检查对同一目录重复读盘。key = 规范化绝对目录路径。
-  // ① 命中时以 fs.stat 版本比对——.gitignore 被修改立即刷新（消除"30 秒 fail-open"窗口）；
+  // .gitignore 规则层缓存（store 级，版本校验优先）：gitignore 极少变化，避免每次
+  // 扫描/实时检查对同一目录重复读盘。key = 规范化绝对目录路径（Windows 全路径小写）。
+  // ① 版本比对优先：版本相同即复用（刷新时间戳、不重读、不清匹配结果缓存），版本变化
+  //    立即重读并清空匹配结果缓存（消除"30 秒 fail-open"窗口）；
   // ② 读取前 withinRoot 校验——工作区内 .gitignore 若是 symlink 指向工作区外，跳过不读
-  //    （内部层级加载只读工作区内；extraIgnoreFiles 是用户显式配置，走 loadGitignoreAt 不受限）。
-  async function cachedGitignoreRules(s, absDirPath) {
+  //    （内部层级加载只读工作区内；extraIgnoreFiles 是用户显式配置，走 loadGitignoreAt 不受限）；
+  // ③ knownVer（walk 的 giEntry.version）可传入省掉 stat（resolve 仍做，防 symlink 越界）。
+  async function cachedGitignoreRules(s, absDirPath, knownVer) {
     if (!s._giCache) s._giCache = new Map()
-    const key = canonCwd(absDirPath)
+    const key0 = canonCwd(absDirPath)
+    const key = IS_WIN ? key0.toLowerCase() : key0 // 避免 displayPath 与 join(cwd) 大小写差异造成双条目
     const now = Date.now()
-    // 探测当前版本（stat 便宜；本函数只对确有 .gitignore 的目录调用）
-    let ver = undefined
-    try {
-      const t = await fs.resolve(join(absDirPath, '.gitignore'))
-      if (!withinRoot(s.cwd, t.targetKey)) return [] // symlink 越界：不读工作区外内容
-      const info = await fs.stat(t)
-      ver = info ? info.version : undefined
-    } catch (e) { ver = undefined }
+    let ver = knownVer
+    let resolved = null
+    if (ver === undefined) {
+      try {
+        const t = await fs.resolve(join(absDirPath, '.gitignore'))
+        resolved = t
+        if (!withinRoot(s.cwd, t.targetKey)) return [] // symlink 越界：不读工作区外内容
+        const info = await fs.stat(t)
+        ver = info ? info.version : undefined
+      } catch (e) { ver = undefined }
+    } else {
+      // knownVer 来自 listDir 条目：补一次 resolve 校验（条目本身可能是指向外部的 symlink）
+      try {
+        const t = await fs.resolve(join(absDirPath, '.gitignore'))
+        resolved = t
+        if (!withinRoot(s.cwd, t.targetKey)) return []
+      } catch (e) { /* resolve 失败按无规则处理 */ }
+    }
     const hit = s._giCache.get(key)
-    if (hit && hit.at && now - hit.at < 30000 && hit.version === String(ver)) return hit.rules
-    const rules = await loadGitignoreAt(join(absDirPath, '.gitignore'))
+    if (hit && hit.version === String(ver) && (ver !== undefined || now - hit.at < 30000)) {
+      hit.at = now // 版本相同：刷新时间戳复用（不重读、不清匹配结果缓存）
+      return hit.rules
+    }
+    const rules = resolved ? await loadGitignoreAt(resolved.targetKey) : await loadGitignoreAt(join(absDirPath, '.gitignore'))
     const val = rules || []
     if (s._giCache.size > 20000) s._giCache.clear() // 缓存兜底上限
     // 规则集变化：清空匹配结果缓存（避免旧规则的结果继续命中）
@@ -183,6 +199,8 @@ export function apply(ctx) {
         else if (p) console.warn('[dsh-diff-review] 自定义忽略文件不可读（已跳过）:', p)
       }
     }
+    // extra 层刷新：匹配结果作废（新规则最长 ~TTL 内生效）
+    if (s._giMatchCache) s._giMatchCache.clear()
     s._extraLayers = layers
     s._extraLayersAt = Date.now()
     return layers
@@ -217,8 +235,14 @@ export function apply(ctx) {
     s._giMatchCache.set(key, { v, at: Date.now() })
     return v
   }
-  // 低频路径（checkLiveFile / reviewItem）：自行向上收集规则层后套结果缓存
+  // 低频路径（checkLiveFile / reviewItem）：先查结果缓存（命中直接返回、不收集规则层——
+  // 层收集每个祖先目录一次 resolve/stat，是主要成本；P2-1 审查项：缓存命中必须零 FS 开销），
+  // miss 才向上收集规则层并匹配
   async function giCachedUpTo(s, relPath, isDir) {
+    if (!s._giMatchCache) s._giMatchCache = new Map()
+    const key = (isDir ? 'd:' : 'f:') + String(relPath)
+    const hit = s._giMatchCache.get(key)
+    if (hit && Date.now() - hit.at < 30000) return hit.v
     return giCachedWithLayers(s, relPath, await gitignoreLayersUpTo(s, relPath), isDir)
   }
   async function walkWorkspace(s) {
@@ -248,12 +272,13 @@ export function apply(ctx) {
       seen.add(seenKey)
       let entries
       try { entries = await fs.listDir(target) } catch (e) { continue }
-      // 本目录层：从 entries 识别 .gitignore 文件条目（无需额外 resolve 探测存在性）
+      // 本目录层：从 entries 识别 .gitignore 文件条目（无需额外 resolve 探测存在性；
+      // 传入条目自带 version，省掉缓存内的 stat 探测）
       let layers = cur.parentLayers
       if (respectGi && cur.depth > 0) {
         const giEntry = entries.find(x => x.type === 'file' && x.name === '.gitignore')
         if (giEntry) {
-          const own = await cachedGitignoreRules(s, cur.path)
+          const own = await cachedGitignoreRules(s, cur.path, giEntry.version)
           if (own.length > 0) {
             const base = relOf(cur.path, s)
             if (base !== '.') layers = cur.parentLayers.concat([{ base, rules: own }])
@@ -653,6 +678,11 @@ export function apply(ctx) {
         st._livePendingPaths = null
         st._liveFull = false
         st._fallbackMs = 5000 // 释放时复位退避，重建后立即恢复 5s 兜底
+        // 缓存随空闲释放（重建便宜，符合 v0.9 回收哲学）
+        st._giCache = null
+        st._giMatchCache = null
+        st._extraLayers = null
+        st._extraLayersAt = 0
       }
       if (st.contentCache.size > CACHE_MAX_ENTRIES) {
         const excess = st.contentCache.size - Math.floor(CACHE_MAX_ENTRIES * 0.75)
@@ -727,6 +757,7 @@ export function apply(ctx) {
           changed.push({ path, info, original: original === undefined ? null : original, current, gitOriginal })
         }
         for (const c of changed) {
+          if (dryRun) continue // 预览扫描：只统计变更数，不计算 diff（LCS 是 CPU 大头，纯浪费）
           // item id 含会话维度：不同会话的同号轮次修改同一文件不得冲突
           const id = String(sessionId) + '::' + turn + '::' + c.path
           if (s.items.has(id)) continue
@@ -750,11 +781,9 @@ export function apply(ctx) {
             hunks: diff.hunks,
             degraded: !!diff.degraded,
           }
-          if (!dryRun) {
-            s.items.set(id, item)
-            group.items.set(c.path, item)
-            s.contentCache.set(c.path, c.current)
-          }
+          s.items.set(id, item)
+          group.items.set(c.path, item)
+          s.contentCache.set(c.path, c.current)
         }
         const nextMeta = new Map()
         for (const [p, info] of meta) nextMeta.set(p, info)
@@ -765,9 +794,11 @@ export function apply(ctx) {
           }
           if (changed.length > 0) s.rev++
         }
+        return changed.length // 变更计数（drvw_debug dry-run 的预览出口；正式扫描也返回，调用方忽略）
       } catch (e) {
         s.lastError = 'scan: ' + ((e && e.message) || String(e))
         console.error('[dsh-diff-review] scan 处理失败', e)
+        return 0
       }
     } finally {
       s.scanning = false
@@ -1078,7 +1109,8 @@ export function apply(ctx) {
       case 'getState': return getState(args)
       case 'getItem': {
         const s = pickStore(args)
-        if (!s) return null
+        // 与 v0.12 错误对象约定一致：无有效工作区也返回错误对象而非 null（防御一致性收尾）
+        if (!s) return { ok: false, error: 'no-store', message: '尚无活跃工作区' }
         const id = args && args.itemId
         // 实时预览项（id 前缀 live::）从 live 桶读取，正式项从 items 读取
         const item = id ? (id.indexOf('live::') === 0 ? s.live.get(id.slice(6)) : s.items.get(id)) : undefined
@@ -1214,7 +1246,15 @@ export function apply(ctx) {
     return Promise.resolve(settings.update(CONFIG_NS, patch))
       .then(() => {
         // 模式切换后同步各工作区 watcher 状态（live→启动，turn→关闭）；失败标记重置以便重试
-        for (const st of STORES.values()) { st.watchFailedAt = 0; st.watchError = ''; syncLiveWatcher(st) }
+        for (const st of STORES.values()) {
+          st.watchFailedAt = 0
+          st.watchError = ''
+          syncLiveWatcher(st)
+          // 忽略配置/extraIgnoreFiles 可能变化：失效 extra 层与匹配结果缓存（否则新规则最长 ~TTL 内不生效）
+          st._extraLayers = null
+          st._extraLayersAt = 0
+          if (st._giMatchCache) st._giMatchCache.clear()
+        }
         return { ok: true, config: { code: patch.code, devenv: patch.devenv, vsDiffMerge: patch.vsDiffMerge, detectMode: patch.detectMode, liveRevert: patch.liveRevert, respectGitignore: patch.respectGitignore } }
       })
       .catch((e) => ({ ok: false, message: (e && e.message) || String(e) }))
@@ -1370,7 +1410,7 @@ export function apply(ctx) {
           enum: ['state', 'scan'],
           description: '调试动作：state（默认）查看状态；scan 立即扫描（只读）',
         },
-        cwd: { type: 'string', description: '目标工作区路径；缺省使用最近活动工作区' },
+        cwd: { type: 'string', description: '目标工作区路径；缺省使用当前调用者会话的工作区（v0.15 起无"最近活跃工作区"回退，无有效会话时返回空状态）' },
       },
       output: {
         schema: {
@@ -1384,6 +1424,7 @@ export function apply(ctx) {
             lastTurn: { type: 'integer' },
             rev: { type: 'integer' },
             scanCount: { type: 'integer' },
+            changedCount: { type: 'integer', description: 'action=scan 最近一次预览扫描统计到的变更文件数（dry-run）' },
             truncated: { type: 'boolean' },
             walkFileCount: { type: 'integer' },
             cacheSize: { type: 'integer' },
@@ -1422,6 +1463,7 @@ export function apply(ctx) {
       async execute(args, exec) {
         let s = null
         let sessionId = null
+        let changedCount = 0 // action=scan 最近一次 dry-run 预览的变更数
         if (exec && exec.agent && exec.agent.session && exec.agent.session.id != null) {
           sessionId = String(exec.agent.session.id)
           // 工具调用也是一种会话活动：登记会话→工作区绑定（不影响轮次计数）
@@ -1433,7 +1475,7 @@ export function apply(ctx) {
           // 防止对任意指定目录建立基线并执行扫描。
           const agentCwd = exec && exec.agent && exec.agent.session && exec.agent.session.header ? exec.agent.session.header.cwd : null
           if (!agentCwd || canonCwd(args.cwd) !== canonCwd(agentCwd)) {
-            return { cwd: '', baselineReady: false, baselineError: '', lastError: 'drvw_debug: cwd 必须等于当前会话工作区（防止越权扫描/写回）', lastTurn: 0, rev: 0, scanCount: 0, walkFileCount: 0, truncated: false, cacheSize: 0, itemCount: 0, pendingCount: 0, loading: false, groups: [], reviewResults: [] }
+            return { cwd: '', baselineReady: false, baselineError: '', lastError: 'drvw_debug: cwd 必须等于当前会话工作区（防止越权扫描/写回）', lastTurn: 0, rev: 0, scanCount: 0, changedCount: 0, walkFileCount: 0, truncated: false, cacheSize: 0, itemCount: 0, pendingCount: 0, loading: false, groups: [], reviewResults: [] }
           }
           s = STORES.get(canonCwd(args.cwd))
           if (!s) s = getStore(args.cwd)
@@ -1450,7 +1492,7 @@ export function apply(ctx) {
           // 返回必须符合 output schema（无 actionDone 字段）；无工作区时返回完整空状态并记入 lastError
           if (!s || !s.cwd) {
             if (s) s.lastError = 'scan-skipped-no-cwd'
-            return { cwd: '', baselineReady: false, baselineError: '', lastError: s ? (s.lastError || '') : '', lastTurn: 0, rev: 0, scanCount: 0, walkFileCount: 0, truncated: false, cacheSize: 0, itemCount: 0, pendingCount: 0, loading: false, groups: [], reviewResults: [] }
+            return { cwd: '', baselineReady: false, baselineError: '', lastError: s ? (s.lastError || '') : '', lastTurn: 0, rev: 0, scanCount: 0, changedCount: 0, walkFileCount: 0, truncated: false, cacheSize: 0, itemCount: 0, pendingCount: 0, loading: false, groups: [], reviewResults: [] }
           }
           // 节流 + 串行化：与 turn-stopping 共用 scanChain 队列，避免并发操作同一 store
           // （并发会污染 fileMeta/contentCache 基线）；2 秒内不重复触发全量扫描，
@@ -1461,11 +1503,11 @@ export function apply(ctx) {
           } else {
             s.lastToolScanAt = now
             // 调试扫描 = 完全 dry-run：固定独立 sessionId（'drvw-scan'），只统计变更，
-            // 不写 items/groups/contentCache/fileMeta、不推进 rev——杜绝覆盖基线缓存
-            // 导致真实回合审阅项被静默跳过、或残留不可见的幽灵项
-            const chain = s.scanChain.then(() => scan(s, 'drvw-scan', 0, { dryRun: true })).catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e) })
+            // 不写 items/groups/contentCache/fileMeta、不推进 rev、不计算 diff——杜绝覆盖
+            // 基线缓存导致真实回合审阅项被静默跳过、或残留不可见的幽灵项
+            const chain = s.scanChain.then(() => scan(s, 'drvw-scan', 0, { dryRun: true })).catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e); return 0 })
             s.scanChain = chain
-            await chain
+            changedCount = await chain
           }
         }
         // 仅保留只读动作（state/scan）；revertAll 等写回动作已移除——调试工具不得成为
@@ -1493,6 +1535,7 @@ export function apply(ctx) {
           lastTurn: s ? s.lastTurn : 0,
           rev: s ? s.rev : 0,
           scanCount: s ? s.scanCount : 0,
+          changedCount,
           walkFileCount: s ? s.walkFileCount : 0,
           truncated: s ? !!s.truncated : false,
           cacheSize: s ? s.contentCache.size : 0,
@@ -1610,5 +1653,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.15.1），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.15.2），typert 唯一通道（无 HTTP 路由）')
 }

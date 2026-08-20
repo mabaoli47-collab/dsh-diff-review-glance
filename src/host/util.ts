@@ -281,6 +281,8 @@ function gitignorePatternToSource(pattern) {
 export const MAX_GITIGNORE_RULES = 2000
 /** 单条模式长度上限：超长模式（如 *a 重复数千次）编译出的正则会在匹配时爆栈，直接丢弃 */
 export const MAX_GITIGNORE_PATTERN_LEN = 1024
+/** 单条模式通配符（* ?）数量上限：a*a*a*… 形态的嵌套量词产生指数回溯正则（test 只拦抛错、拦不住慢） */
+export const MAX_GITIGNORE_WILDCARDS = 64
 /**
  * 解析 .gitignore 文本 → 规则列表（顺序敏感：后匹配的规则优先，! 取反）。
  * 健壮性：非法模式（如 [z-a]）逐行 try/catch 丢弃该行、其余规则继续生效——拒绝
@@ -295,6 +297,8 @@ export function parseGitignore(text) {
     if (!raw || raw[0] === '#') continue
     // 超长单条模式丢弃：编译出的正则（.* / [^/]* 展开）在匹配时可能爆栈（可用性 DoS）
     if (raw.length > MAX_GITIGNORE_PATTERN_LEN) continue
+    // 通配符过多丢弃：a*a*a*… 嵌套量词导致指数回溯（正则 test 不抛错但极慢）
+    if ((raw.match(/[*?]/g) || []).length > MAX_GITIGNORE_WILDCARDS) continue
     let negate = false
     if (raw[0] === '!') { negate = true; raw = raw.slice(1) }
     if (!raw) continue

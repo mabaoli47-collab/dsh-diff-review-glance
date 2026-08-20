@@ -200,6 +200,13 @@ describe('gitignore matching', () => {
     expect(rules.length).toBe(1) // 超长行被丢弃，仅剩 *.tmp
     expect(gitignoreMatch(rules, 'x.tmp')).toBe(true)
   })
+  it('drops patterns with too many wildcards', () => {
+    // a*a*a*… 嵌套量词 → 指数回溯正则（test 不抛错但极慢）
+    const bad = 'a*'.repeat(70)
+    const rules = parseGitignore(bad + '\n*.tmp\n')
+    expect(rules.length).toBe(1) // 通配符超限行被丢弃，仅剩 *.tmp
+    expect(gitignoreMatch(rules, 'x.tmp')).toBe(true)
+  })
 })
 
 describe('layered gitignore matching', () => {

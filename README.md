@@ -136,6 +136,7 @@ npm test        # vitest 单元测试（纯函数：路径/边界/敏感名单/d
 | v0.14.1 | **评审微修**：字符类长度上限（防 ReDoS 自伤）；会话隔离语义变更标注版本号；`checkLiveFile` 与 `walkWorkspace` 的 gitignore 判定路径等价性说明 |
 | v0.15.0 | **评审修复**：单条 gitignore 模式长度上限 1024（防正则爆栈 DoS）+ 匹配 test 包 try/catch；`realPathBlocked` 只检查工作区根以下相对段（工作区在 build/ 下不再整体失效）+ Windows 盘符路径大小写折叠（.SSH/.NODE_MODULES 命中）；gitignore 规则缓存加版本校验（消除 30 秒 fail-open）+ symlink 越界不读；`pickStore` 移除最近活跃桶回退（fail-closed）；live 事件集合硬上限 1000 |
 | v0.15.1 | **匹配结果缓存（R1 性能项）**：同一文件跨 walk/live/审查的重复 gitignore 正则匹配改为文件级结果缓存（TTL 30s，规则集变化即清空）——消除 live 兜底全量/回合末全量的重复匹配成本；规则上限保持 2000（不降，避免功能损失） |
+| v0.15.2 | **评审修复（P2）**：`giCachedUpTo` 缓存查询前置（命中零 FS 开销）；`cachedGitignoreRules` 接受外部 version（walk 省 stat）；dry-run scan 输出 `changedCount` 且跳过 diff 计算；单模式通配符上限 64（闭合指数回溯 ReDoS）；失效矩阵补全（extraLayers/saveEditorConfig 清缓存、版本相同不清匹配缓存）、getItem null 出口、空闲释放清缓存 |
 
 ## 许可
 
