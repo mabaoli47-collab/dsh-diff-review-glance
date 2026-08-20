@@ -444,7 +444,8 @@ function apply(ctx) {
       React.createElement('button', { className: 'dshdr-btn', disabled: busy, onClick: () => openExternal('vscode', false) }, 'VS Code 打开'),
       React.createElement('button', { className: 'dshdr-btn', disabled: busy || item.originalMissing, title: item.originalMissing ? '原始内容未知' : undefined, onClick: () => openExternal('vscode', true) }, 'VS Code Diff'),
       React.createElement('button', { className: 'dshdr-btn', disabled: busy, onClick: () => openExternal('vs', false) }, 'VS 2022 打开'),
-      React.createElement('button', { className: 'dshdr-btn', disabled: busy || item.originalMissing, title: item.originalMissing ? '原始内容未知' : undefined, onClick: () => openExternal('vs', true) }, 'VS 2022 Diff')))
+      React.createElement('button', { className: 'dshdr-btn', disabled: busy || item.originalMissing, title: item.originalMissing ? '原始内容未知' : undefined, onClick: () => openExternal('vs', true) }, 'VS 2022 Diff'),
+      React.createElement('button', { className: 'dshdr-btn', disabled: busy, onClick: () => openExternal('explorer', false) }, '在资源管理器中显示')))
     if (open && detail === null && !error) body.push(React.createElement('div', { key: 'l', className: 'dshdr-loading' }, '加载 diff…'))
     if (open && detail) body.push(React.createElement('div', { key: 'd', className: 'dshdr-detail', style: { padding: '4px' } }, React.createElement(DiffView, { item: detail })))
     return React.createElement('div', { className: 'dshdr-item' }, head, body.length ? React.createElement('div', null, body) : null)

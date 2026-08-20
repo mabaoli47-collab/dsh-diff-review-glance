@@ -4,7 +4,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { tmpdir } from 'node:os'
-import { join, posix } from 'node:path'
+import { dirname, join, posix } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { chmod } from 'node:fs/promises'
 import { canonCwd, IGNORE_DIRS, norm, relOf, isSensitiveFile, withinRoot, realPathBlocked, shortSessionId, turnKey, splitLines, computeDiff } from './host/util.js'
@@ -483,6 +483,18 @@ export function apply(ctx) {
     if (/[\u0000-\u001f]/.test(String(left)) || /[\u0000-\u001f]/.test(String(right))) {
       return 'Write-Output \'ERR:文件路径含控制字符，已拒绝打开\'; exit 1'
     }
+    // 「在文件资源管理器中显示」：Windows explorer /select, / macOS open -R / Linux xdg-open 目录
+    if (editor === 'explorer') {
+      const qPosix = (line) => "'" + String(line).replace(/'/g, "'\\''") + "'"
+      const qWin = (line) => "'" + String(line).replace(/'/g, "''") + "'"
+      if (String(process.platform) !== 'win32') {
+        if (String(process.platform) === 'darwin') return 'open -R ' + qPosix(left) + '; echo OK:'
+        return 'xdg-open ' + qPosix(dirname(String(left).replace(/\\/g, '/'))) + '; echo OK:'
+      }
+      // explorer.exe 是 GUI 程序（启动即返回）；/select,"path" 在资源管理器中定位并选中
+      const quoted = '"' + String(left).replace(/"/g, '""') + '"'
+      return 'Start-Process -FilePath explorer.exe -ArgumentList ' + qWin('/select,' + quoted) + '; Write-Output "OK:"'
+    }
     // POSIX（macOS / Linux）：code 命令（或配置路径）打开/diff；VS2022 仅 Windows 支持。
     // 命令前先校验可执行文件存在，失败输出 ERR:（避免 command-not-found 后仍 echo OK: 误判成功）
     if (String(process.platform) !== 'win32') {
@@ -676,7 +688,7 @@ export function apply(ctx) {
 
   async function openExternal(args) {
     const itemId = args && args.itemId
-    const editor = args && args.editor === 'vs' ? 'vs' : 'vscode'
+    const editor = args && args.editor === 'vs' ? 'vs' : (args && args.editor === 'explorer' ? 'explorer' : 'vscode')
     const diff = !!(args && args.diff)
     const s = pickStore(args)
     if (!s) return { ok: false, message: '尚无活跃工作区，无法打开' }
@@ -1124,5 +1136,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.4.4），typert 路由 + webServer 过渡路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.4.5），typert 路由 + webServer 过渡路由:', ROUTE)
 }
