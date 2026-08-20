@@ -30,6 +30,7 @@ export function apply(ctx) {
   const PRIME_MAX_FILES = 6000
   const PRIME_MAX_CHARS = 48 * 1024 * 1024
   const CONFIG_NS = 'dsh-diff-review'
+  const IS_WIN = String(process.platform) === 'win32'
   // 空闲资源回收：工作区超过此时间无任何会话活动（getState/回合/实时检查）时，
   // 释放该 store 的 watcher 句柄与定时器（contentCache/审阅记录保留）
   const IDLE_RELEASE_MS = 10 * 60 * 1000
@@ -43,7 +44,6 @@ export function apply(ctx) {
 
   // 多基线设计：每个工作区（cwd）一个独立状态桶
   const STORES = new Map()
-  let active = null
   // 会话注册表（第二层）：sessionId -> { cwd: canonCwd, lastTurn: number, label: string }
   // dsh 会话持有自己的工作区与轮次计数；turn 仅会话内唯一，同工作区可挂多个会话
   const SESSIONS = new Map()
@@ -115,8 +115,10 @@ export function apply(ctx) {
       if (s) return s
       return null
     }
-    // 未携带任何键（页面加载早期等）时回落最近活跃桶，不构成跨工作区误判
-    return active
+    // v0.15：移除"最近活跃桶"回退——typert 通道 agent 恒注入（不可伪造），无有效会话的
+    // 请求一律返回 null（fail-closed），避免 agent 注入异常时 getState/reviewAll 意外
+    // 作用于最近活跃工作区
+    return null
   }
 
   // 敏感文件默认排除：凭据/密钥类文件不纳入基线对比——不读入内存缓存、不产生 diff、
@@ -141,17 +143,29 @@ export function apply(ctx) {
       return rules.length > 0 ? rules : null
     } catch (e) { return null }
   }
-  // .gitignore 规则层缓存（store 级，TTL 30 秒）：gitignore 极少变化，避免每次
+  // .gitignore 规则层缓存（store 级，TTL 30 秒 + 版本校验）：gitignore 极少变化，避免每次
   // 扫描/实时检查对同一目录重复读盘。key = 规范化绝对目录路径。
+  // ① 命中时以 fs.stat 版本比对——.gitignore 被修改立即刷新（消除"30 秒 fail-open"窗口）；
+  // ② 读取前 withinRoot 校验——工作区内 .gitignore 若是 symlink 指向工作区外，跳过不读
+  //    （内部层级加载只读工作区内；extraIgnoreFiles 是用户显式配置，走 loadGitignoreAt 不受限）。
   async function cachedGitignoreRules(s, absDirPath) {
     if (!s._giCache) s._giCache = new Map()
     const key = canonCwd(absDirPath)
+    const now = Date.now()
+    // 探测当前版本（stat 便宜；本函数只对确有 .gitignore 的目录调用）
+    let ver = undefined
+    try {
+      const t = await fs.resolve(join(absDirPath, '.gitignore'))
+      if (!withinRoot(s.cwd, t.targetKey)) return [] // symlink 越界：不读工作区外内容
+      const info = await fs.stat(t)
+      ver = info ? info.version : undefined
+    } catch (e) { ver = undefined }
     const hit = s._giCache.get(key)
-    if (hit && Date.now() - hit.at < 30000) return hit.rules
+    if (hit && hit.at && now - hit.at < 30000 && hit.version === String(ver)) return hit.rules
     const rules = await loadGitignoreAt(join(absDirPath, '.gitignore'))
     const val = rules || []
     if (s._giCache.size > 20000) s._giCache.clear() // 缓存兜底上限
-    s._giCache.set(key, { rules: val, at: Date.now() })
+    s._giCache.set(key, { rules: val, version: String(ver), at: now })
     return val
   }
   // 用户自配的外部忽略文件（settings extraIgnoreFiles，每行一个路径，可工作区外）：
@@ -229,12 +243,13 @@ export function apply(ctx) {
       for (let k = entries.length - 1; k >= 0; k--) {
         const e = entries[k]
         if (e.type === 'directory') {
-          if (IGNORE_DIRS.has(e.name)) continue
+          // Windows 大小写不敏感：NODE_MODULES/.SSH 等大写变体同样命中 IGNORE_DIRS
+          if (IGNORE_DIRS.has(IS_WIN ? e.name.toLowerCase() : e.name)) continue
           // 目录 symlink 改名绕过（notkube -> .kube）：resolve 后重判真实路径段
           let dTarget
           try { dTarget = await fs.resolve(e.target.displayPath) } catch (err) { continue }
           if (!withinRoot(root, dTarget.targetKey)) continue
-          if (realPathBlocked(dTarget.targetKey)) continue
+          if (realPathBlocked(dTarget.targetKey, root)) continue
           // gitignore 目录命中：整个目录不深入（用当前目录的规则链判断）
           if (gitignoreMatchLayered(layers, relOf(dTarget.displayPath, { cwd: root }), true)) continue
           stack.push({ path: dTarget.displayPath, depth: cur.depth + 1, parentLayers: layers })
@@ -248,9 +263,9 @@ export function apply(ctx) {
           try { fTarget = await fs.resolve(e.target.displayPath) } catch (err) { continue }
           if (!withinRoot(root, fTarget.targetKey)) continue
           // 敏感判断移到解析后真实路径：foo.txt -> .env 之类的改名链接
-          // 用真实 basename 重判 + 真实路径段忽略检查
+          // 用真实 basename 重判 + 真实路径段忽略检查（仅检查工作区根以下的相对段）
           const realName = fTarget.displayPath.split('/').pop() || e.name
-          if (isSensitiveFile(realName) || realPathBlocked(fTarget.targetKey)) continue
+          if (isSensitiveFile(realName) || realPathBlocked(fTarget.targetKey, root)) continue
           // gitignore 文件命中：不读入基线、不产生审阅项（分层规则链）
           if (gitignoreMatchLayered(layers, relOf(fTarget.displayPath, { cwd: root }), false)) continue
           let ver = e.version
@@ -423,6 +438,15 @@ export function apply(ctx) {
       // 不能只保留最后一个文件名（否则前面的变更全部丢失）
       if (!s._livePendingPaths) s._livePendingPaths = new Set()
       s._livePendingPaths.add(filename)
+      // 事件集合硬上限：持续高频写入下定时器可能被无限重置、Set 无限增长——
+      // 达到上限立即清空并强制全量检查（不等待去抖）
+      if (s._livePendingPaths.size >= 1000) {
+        s._liveFull = true
+        s._livePendingPaths = null
+        if (s.watchTimer) { clearTimeout(s.watchTimer); s.watchTimer = null }
+        queueLiveCheck(s)
+        return
+      }
     } else {
       // 无文件名（目录级/未知事件）：标记需要全量兜底
       s._liveFull = true
@@ -479,7 +503,7 @@ export function apply(ctx) {
     try { target = await fs.resolve(joined) } catch (e) { return removeLivePath(s, rawPath) }
     if (!withinRoot(s.cwd, target.targetKey)) return false
     const realName = target.displayPath.split('/').pop() || ''
-    if (isSensitiveFile(realName) || realPathBlocked(target.targetKey)) return false
+    if (isSensitiveFile(realName) || realPathBlocked(target.targetKey, s.cwd)) return false
     // gitignore 加强（分层 + 用户自配外部文件）：被忽略的文件不进实时预览（已在 live 桶则移除）；设置可关闭。
     // 与 walkWorkspace 的层级语义等价（gitignoreLayersUpTo 收集 extra 基础层 + 根→文件所在目录逐层），
     // 保证"全量扫描排除、单文件事件也排除"的一致行为（3.2 审查项：两条路径同一判定结果）。
@@ -1395,8 +1419,8 @@ export function apply(ctx) {
           if (!s) s = getStore(args.cwd)
         }
         // 不提供 cwd 时仅使用当前调用者会话的工作区（registerSession 已登记）；
-        // 不再回退到 active（最后活跃工作区）——否则提示注入下 AI 不带参数调用
-        // 会拿到其他工作区的内部状态，违背工作区隔离原则
+        // 不回退到任何"最近活跃工作区"（v0.15 起 pickStore 已移除该回退）——否则提示
+        // 注入下 AI 不带参数调用会拿到其他工作区的内部状态，违背工作区隔离原则
         if (s) {
           ensureBaseline(s)
           if (s.baseline) { try { await s.baseline } catch (e) {} }
@@ -1501,7 +1525,6 @@ export function apply(ctx) {
     })
     s.session = agent.session
     s.lastActivityAt = Date.now()
-    active = s
     if (typeof turn === 'number' && turn > 0) {
       SESSIONS.get(sid).lastTurn = turn
       s.sessions.get(sid).lastTurn = turn
@@ -1567,5 +1590,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.14.1），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.15.0），typert 唯一通道（无 HTTP 路由）')
 }

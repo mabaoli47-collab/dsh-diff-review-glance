@@ -77,6 +77,20 @@ describe('realPathBlocked', () => {
     expect(realPathBlocked('c:/proj/.ssh/config')).toBe(true)
     expect(realPathBlocked('c:/proj/src/x.js')).toBe(false)
   })
+  it('only checks segments below the workspace root', () => {
+    // 工作区自身位于 build/ 等忽略名下时不再整体失效
+    expect(realPathBlocked('/home/u/build/proj/src/a.ts', '/home/u/build/proj')).toBe(false)
+    expect(realPathBlocked('/home/u/build/proj/node_modules/x.js', '/home/u/build/proj')).toBe(true)
+  })
+  it('folds case on Windows drive paths', () => {
+    expect(realPathBlocked('C:/proj/.SSH/config', 'C:/proj')).toBe(true)
+    expect(realPathBlocked('C:/proj/NODE_MODULES/x.js', 'C:/proj')).toBe(true)
+    expect(realPathBlocked('C:/proj/src/a.ts', 'C:/proj')).toBe(false)
+  })
+  it('keeps POSIX case-sensitive', () => {
+    expect(realPathBlocked('/home/u/.KUBE/config', '/home/u')).toBe(false)
+    expect(realPathBlocked('/home/u/.kube/config', '/home/u')).toBe(true)
+  })
 })
 
 describe('turnKey / shortSessionId', () => {
@@ -178,6 +192,13 @@ describe('gitignore matching', () => {
     expect(rules.length).toBe(2)
     expect(gitignoreMatch(rules, 'x.tmp')).toBe(true)
     expect(gitignoreMatch(rules, 'x.txt')).toBe(false)
+  })
+  it('drops oversized single-line patterns', () => {
+    // *a 重复 6000 次（12KB 单行）：此前会编译出匹配时爆栈的正则（可用性 DoS）
+    const long = '*a'.repeat(6000)
+    const rules = parseGitignore(long + '\n*.tmp\n')
+    expect(rules.length).toBe(1) // 超长行被丢弃，仅剩 *.tmp
+    expect(gitignoreMatch(rules, 'x.tmp')).toBe(true)
   })
 })
 

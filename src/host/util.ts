@@ -77,11 +77,32 @@ export function withinRoot(root, targetKey) {
  * 解析后真实路径的段级检查：改名的 symlink（foo.txt -> .env、notkube -> .kube）
  * 会绕过基于 listDir 条目名的敏感/忽略判断，必须用真实路径（targetKey）重判——
  * 路径任一目录段命中 IGNORE_DIRS（.ssh/.aws/.kube/.docker 等）即拦截。
+ * 修复（v0.15）：
+ * ① 只检查"工作区根以下的相对段"（root 提供时）——工作区自身位于 build/、target/
+ *    等忽略名下时不再整体失效（否则插件被静默禁用）；
+ * ② Windows 盘符路径大小写不敏感（.SSH/.AWS/NODE_MODULES 同样命中）——POSIX 保持精确。
  */
-export function realPathBlocked(targetKey) {
-  const segs = norm(targetKey).split('/')
+export function realPathBlocked(targetKey, root) {
+  let p = norm(targetKey)
+  const isWinPath = /^[a-zA-Z]:\//.test(p)
+  if (root) {
+    const r = norm(root).replace(/\/+$/, '')
+    if (isWinPath) {
+      const rl = r.toLowerCase()
+      const pl = p.toLowerCase()
+      if (pl === rl) return false
+      if (pl.indexOf(rl + '/') === 0) p = pl.slice(rl.length + 1)
+    } else if (p === r) {
+      return false
+    } else if (p.indexOf(r + '/') === 0) {
+      p = p.slice(r.length).replace(/^\/+/, '')
+    }
+    // 不在 root 下：保留原路径检查（防御）
+  }
+  const segs = p.split('/')
   for (const seg of segs) {
-    if (IGNORE_DIRS.has(seg)) return true
+    const s = isWinPath ? seg.toLowerCase() : seg
+    if (IGNORE_DIRS.has(s)) return true
   }
   return false
 }
@@ -257,7 +278,9 @@ function gitignorePatternToSource(pattern) {
   return src
 }
 /** 单文件 .gitignore 规则条数上限：防巨型忽略文件导致的匹配 DoS（超出即截断） */
-export const MAX_GITIGNORE_RULES = 5000
+export const MAX_GITIGNORE_RULES = 2000
+/** 单条模式长度上限：超长模式（如 *a 重复数千次）编译出的正则会在匹配时爆栈，直接丢弃 */
+export const MAX_GITIGNORE_PATTERN_LEN = 1024
 /**
  * 解析 .gitignore 文本 → 规则列表（顺序敏感：后匹配的规则优先，! 取反）。
  * 健壮性：非法模式（如 [z-a]）逐行 try/catch 丢弃该行、其余规则继续生效——拒绝
@@ -270,6 +293,8 @@ export function parseGitignore(text) {
     if (rules.length >= MAX_GITIGNORE_RULES) break
     raw = raw.replace(/\s+$/, '')
     if (!raw || raw[0] === '#') continue
+    // 超长单条模式丢弃：编译出的正则（.* / [^/]* 展开）在匹配时可能爆栈（可用性 DoS）
+    if (raw.length > MAX_GITIGNORE_PATTERN_LEN) continue
     let negate = false
     if (raw[0] === '!') { negate = true; raw = raw.slice(1) }
     if (!raw) continue
@@ -314,7 +339,11 @@ export function gitignoreMatchResult(rules, relPath, isDir) {
     for (let ci = 0; ci < candidates.length; ci++) {
       // 目录模式（尾部 /）不匹配文件本体（但可匹配其目录前缀）
       if (rule.dirOnly && ci === last && !isDir) continue
-      if (rule.re.test(candidates[ci])) { hit = true; break }
+      // 正则测试包 try/catch：极端模式下匹配可能抛错（栈溢出等），按"不命中"处理——
+      // 保证恶意/畸形规则最多导致该规则不生效，绝不使扫描整体崩溃（可用性 DoS）
+      let m = false
+      try { m = rule.re.test(candidates[ci]) } catch (e) { m = false }
+      if (m) { hit = true; break }
     }
     if (hit) ignored = rule.negate ? 'reinclude' : 'ignore'
   }
