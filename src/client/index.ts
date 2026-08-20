@@ -384,8 +384,11 @@ function apply(ctx) {
           pane(right, 'right'))))
   }
   function actionsFor(item) {
-    // 实时预览项：只读展示（回合结束后并入正式审阅项才可操作）
-    if (item.live) return []
+    // 实时预览项：进行中即可直接撤销（带版本冲突保护）；保留无意义（回合结束自动成为正式项）
+    if (item.live) {
+      if (item.originalMissing || item.gitOriginal) return []
+      return item.status === 'pending' ? [['revert', '撤销']] : []
+    }
     // gitOriginal：原文来自 git HEAD 非会话基线，撤销会回退到 HEAD 吞掉未提交工作——仅允许保留
     if (item.originalMissing || item.gitOriginal) return item.status === 'pending' ? [['keep', '保留']] : []
     if (item.status === 'pending') return [['keep', '保留'], ['revert', '撤销']]
@@ -441,8 +444,8 @@ function apply(ctx) {
         disabled: busy,
         onClick: (e) => { e.stopPropagation(); act(a[0]) },
       }, a[1])),
-      // 实时预览项只读：不提供"其他打开方式"（host 侧也拒绝 live 项的外部打开）
-      item.live ? null : React.createElement('button', {
+      // 实时预览项也可外部打开（打开的是当前工作区文件本身）
+      React.createElement('button', {
         key: 'open',
         className: 'dshdr-btn',
         disabled: busy,

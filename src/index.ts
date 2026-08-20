@@ -389,6 +389,9 @@ export function apply(ctx) {
   }
   // 单文件版本对比 → 更新 live 桶（与 scan 的 item 生成逻辑同构，但不改 fileMeta）
   async function liveCompare(s, path, target, ver, size) {
+    // 已撤销的 live 项冻结：文件已恢复为会话基线，不再被实时刷新覆盖（回合结束统一清空）
+    const existing = s.live.get(path)
+    if (existing && existing.status === 'reverted') return false
     const prev = s.fileMeta.get(path)
     if (prev && prev.version === String(ver)) return false
     if (!prev) {
@@ -844,7 +847,23 @@ export function apply(ctx) {
         const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
         if (!sid) return { ok: false, error: 'no-store', message: '缺少会话标识，操作已拒绝' }
         const item = args && args.itemId ? (args.itemId.indexOf('live::') === 0 ? s.live.get(args.itemId.slice(6)) : s.items.get(args.itemId)) : undefined
-        if (item && item.live) return { ok: false, error: 'live-item', message: '进行中的修改预览不可审阅，回合结束后再操作' }
+        if (item && item.live) {
+          // 实时预览项：进行中即可直接撤销（无需等回合结束）。
+          // 安全护栏：① 走 applyFileWrite 版本冲突检测——AI 在你撤销后已改过文件则拒绝，不静默破坏；
+          // ② 原始内容未知（originalMissing/gitOriginal）不可撤销；③ 撤销成功后该项冻结
+          // （liveCompare 跳过已撤销项，不再被实时刷新覆盖），文件恢复为会话基线后，
+          // 回合扫描会因 original===current 天然跳过，不会重复产生正式审阅项。
+          // 「保留」在 live 阶段无意义（回合结束自动成为正式项），不提供。
+          if (args && args.action === 'revert' && !item.originalMissing && !item.gitOriginal) {
+            const res = await applyFileWrite(s, item.file, item.original, item.modified)
+            if (!res.ok) return res
+            item.status = 'reverted'
+            item.current = item.original
+            s.rev++
+            return { ok: true, status: item.status }
+          }
+          return { ok: false, error: 'live-item', message: (item.originalMissing || item.gitOriginal) ? '原始内容未知，无法撤销' : '进行中的修改预览仅支持撤销' }
+        }
         if (item && item.sessionId !== sid) return { ok: false, error: 'no-store', message: '会话不匹配，操作已拒绝' }
         return reviewItem(s, args && args.itemId, args && args.action)
       }
@@ -930,12 +949,11 @@ export function apply(ctx) {
     if (!s) return { ok: false, message: '尚无活跃工作区，无法打开' }
     const item = itemId ? (itemId.indexOf('live::') === 0 ? s.live.get(itemId.slice(6)) : s.items.get(itemId)) : undefined
     if (!item) return { ok: false, message: '记录不存在（插件可能已重启）' }
-    // 实时预览项：只读展示，不支持外部打开（原始内容可能仍为中间态）
-    if (item.live) return { ok: false, message: '进行中的修改预览暂不支持外部打开' }
-    // 会话隔离（与 getItem/review 一致）：必须携带会话标识且禁止跨会话触发写临时原文 + 启动进程
+    // 会话隔离（与 getItem/review 一致）：必须携带会话标识且禁止跨会话触发写临时原文 + 启动进程。
+    // 实时预览项是工作区级（不归属会话），跳过会话归属校验，但仍要求携带会话标识（防 HTTP 通道匿名）
     const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
     if (!sid) return { ok: false, message: '缺少会话标识，操作已拒绝' }
-    if (item.sessionId !== sid) return { ok: false, message: '会话不匹配，操作已拒绝' }
+    if (!item.live && item.sessionId !== sid) return { ok: false, message: '会话不匹配，操作已拒绝' }
     if (!s.cwd) return { ok: false, message: '工作区尚未就绪' }
     try {
       let left = item.file
@@ -1398,5 +1416,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.5.2），typert 路由 + webServer 过渡路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.6.0），typert 路由 + webServer 过渡路由:', ROUTE)
 }
