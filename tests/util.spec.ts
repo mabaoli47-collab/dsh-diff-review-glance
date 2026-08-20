@@ -172,6 +172,13 @@ describe('gitignore matching', () => {
     const rules = parseGitignore(Array.from({ length: 6000 }, (_, i) => 'x' + i + '.tmp').join('\n') + '\n')
     expect(rules.length).toBeLessThanOrEqual(5000)
   })
+  it('escapes oversized character classes to literals', () => {
+    const big = '[' + 'a'.repeat(300) + ']'
+    const rules = parseGitignore(big + '\n*.tmp\n')
+    expect(rules.length).toBe(2)
+    expect(gitignoreMatch(rules, 'x.tmp')).toBe(true)
+    expect(gitignoreMatch(rules, 'x.txt')).toBe(false)
+  })
 })
 
 describe('layered gitignore matching', () => {

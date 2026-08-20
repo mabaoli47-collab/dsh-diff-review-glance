@@ -480,7 +480,9 @@ export function apply(ctx) {
     if (!withinRoot(s.cwd, target.targetKey)) return false
     const realName = target.displayPath.split('/').pop() || ''
     if (isSensitiveFile(realName) || realPathBlocked(target.targetKey)) return false
-    // gitignore 加强（分层 + 用户自配外部文件）：被忽略的文件不进实时预览（已在 live 桶则移除）；设置可关闭
+    // gitignore 加强（分层 + 用户自配外部文件）：被忽略的文件不进实时预览（已在 live 桶则移除）；设置可关闭。
+    // 与 walkWorkspace 的层级语义等价（gitignoreLayersUpTo 收集 extra 基础层 + 根→文件所在目录逐层），
+    // 保证"全量扫描排除、单文件事件也排除"的一致行为（3.2 审查项：两条路径同一判定结果）。
     if (readConfig().respectGitignore && gitignoreMatchLayered(await gitignoreLayersUpTo(s, relOf(target.displayPath, s)), relOf(target.displayPath, s), false)) {
       s.live.delete(target.displayPath)
       return false
@@ -1040,8 +1042,10 @@ export function apply(ctx) {
           // 返回错误对象而非 null：客户端可区分"记录不存在"与"加载中"（避免卡"加载 diff…"）
           return { ok: false, error: 'not-found', message: '记录不存在（插件可能已重启）' }
         }
-        // 会话标识必填（fail-closed）。操作范围 = 当前 agent 所在工作区（pickStore 已按会话定位
-        // 工作区 store）；store 内的正式/live 项均属该工作区，可读取（typert agent 不可伪造）。
+        // 会话标识必填（fail-closed）。操作范围 = 当前 agent 所在工作区（v0.12 起的语义变更：
+        // 从"严格会话隔离"调整为"工作区级信任边界"——typert agent 不可伪造、同一工作区的
+        // 会话属同一用户项目；pickStore 已按会话定位工作区 store），store 内的正式/live 项
+        // 均属该工作区，可读取（typert agent 不可伪造）。
         const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
         if (!sid) return { ok: false, error: 'no-store', message: '缺少会话标识，操作已拒绝' }
         return itemFull(item)
@@ -1049,8 +1053,9 @@ export function apply(ctx) {
       case 'review': {
         const s = pickStore(args)
         if (!s) return { ok: false, error: 'no-store', message: '尚无活跃工作区' }
-        // 会话标识必填（fail-closed）。操作范围 = 当前 agent 所在工作区：store 内的正式/live 项
-        // 均属该工作区，允许操作（typert agent 不可伪造；跨工作区由 pickStore 隔离）
+        // 会话标识必填（fail-closed）。操作范围 = 当前 agent 所在工作区（v0.12 起语义变更：
+        // 工作区级信任边界，见 getItem 注释）：store 内的正式/live 项均属该工作区，允许操作
+        // （typert agent 不可伪造；跨工作区由 pickStore 隔离）
         const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
         if (!sid) return { ok: false, error: 'no-store', message: '缺少会话标识，操作已拒绝' }
         const item = args && args.itemId ? (args.itemId.indexOf('live::') === 0 ? s.live.get(args.itemId.slice(6)) : s.items.get(args.itemId)) : undefined
@@ -1179,8 +1184,8 @@ export function apply(ctx) {
     if (!s) return { ok: false, message: '尚无活跃工作区，无法打开' }
     const item = itemId ? (itemId.indexOf('live::') === 0 ? s.live.get(itemId.slice(6)) : s.items.get(itemId)) : undefined
     if (!item) return { ok: false, message: '记录不存在（插件可能已重启）' }
-    // 会话标识必填（fail-closed）。操作范围 = 当前 agent 所在工作区（pickStore 已按会话定位
-    // 工作区 store）；store 内的正式/live 项均属该工作区，可触发外部打开（typert agent 不可伪造）
+    // 会话标识必填（fail-closed）。操作范围 = 当前 agent 所在工作区（v0.12 起语义变更：
+    // 工作区级信任边界，见 getItem 注释）；store 内的正式/live 项均属该工作区，可触发外部打开
     const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
     if (!sid) return { ok: false, message: '缺少会话标识，操作已拒绝' }
     if (!s.cwd) return { ok: false, message: '工作区尚未就绪' }
@@ -1562,5 +1567,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.14.0），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.14.1），typert 唯一通道（无 HTTP 路由）')
 }

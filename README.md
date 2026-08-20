@@ -133,6 +133,7 @@ npm test        # vitest 单元测试（纯函数：路径/边界/敏感名单/d
 | v0.12.0 | **评审修复**：跨会话操作统一为「当前工作区」语义（reviewSession 支持 `targetSessionId` 同工作区校验；getItem 返回错误对象不再卡「加载 diff…」）；live 静默兜底改**指数退避**（空闲不再每 5 秒全量扫描）；`agentSessionId` 显式取值；调试扫描独立会话 + 不推进基线；基线失败可重试；state 比对补 `truncated`/`limits`；渲染期副作用移入 effect；页面隐藏暂停轮询；清理死代码/版本文案 |
 | v0.13.0 | **嵌套 .gitignore + 自定义忽略文件**：遍历读取每一层 `.gitignore`（各管各的子树、深层规则优先、父层规则也作用于嵌套仓库内部——比 git 更保守）；新增设置 `extraIgnoreFiles` 支持工作区外自定义忽略文件（基础层，纯只读匹配） |
 | v0.14.0 | **评审修复**：`drvw_debug` scan 改**完全 dry-run**（不再覆盖 contentCache 导致真实审阅项被静默跳过、不再残留幽灵项）；.gitignore 逐行容错（坏行丢弃其余生效）+ 规则条数上限 5000 + `**/` 根级匹配；revert/redo 前补忽略校验；.gitignore 规则层 TTL 缓存 + 从 entries 判断存在性（消除无效 IO）；baselineError 清除、`_fallbackMs` 复位、keepSession 错误展示 |
+| v0.14.1 | **评审微修**：字符类长度上限（防 ReDoS 自伤）；会话隔离语义变更标注版本号；`checkLiveFile` 与 `walkWorkspace` 的 gitignore 判定路径等价性说明 |
 
 ## 许可
 

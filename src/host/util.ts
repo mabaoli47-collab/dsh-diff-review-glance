@@ -226,6 +226,8 @@ export function computeDiff(original, current) {
 function escapeReChar(c) {
   return /[.*+?^${}()|[\]\\]/.test(c) ? '\\' + c : c
 }
+/** 字符类长度上限：超长字符类（如 [a...300 字符]）转义为字面量，防 ReDoS 自伤 */
+const MAX_CHAR_CLASS_LEN = 200
 /** 把一条 gitignore 模式编译为正则片段（不包含边界锚定） */
 function gitignorePatternToSource(pattern) {
   let src = ''
@@ -238,7 +240,11 @@ function gitignorePatternToSource(pattern) {
       src += '[^/]'
     } else if (ch === '[') {
       const close = pattern.indexOf(']', i + 1)
-      if (close === -1) { src += '\\['; continue }
+      if (close === -1 || close - i > MAX_CHAR_CLASS_LEN) {
+        // 无闭合或超长字符类：按字面量转义（正则开销与长度解耦）
+        src += '\\['
+        continue
+      }
       src += pattern.slice(i, close + 1)
       i = close
     } else if (ch === '\\') {
