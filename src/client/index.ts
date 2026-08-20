@@ -3,10 +3,16 @@
 // agent 由运行时注入，无需再传 sessionId。v0.8：typert 为唯一通道（无 HTTP 回退）。
 import * as React from 'react'
 
-// ---- typert remote 描述符（与 host src/host/typert.ts 的 wire 契约一致；client 侧不依赖 zod，codec 用 src-json）----
+// ---- typert remote 描述符（与 host src/host/typert.ts 的 wire 契约一致）----
+// 宿主的 client loader（requireStrictCodec）要求 result/参数 codec 为 strict（mode + typeSymbol
+// + zod-backed schema），src-json 会被拒（"field result has no strict codec"，0.16.2 诊断确认）。
+// client 不依赖 zod：构造鸭子 zod v4 schema（_zod + identity parse）——通过形状校验，
+// 运行时透传 JSON，与 host 的 z.any() 语义一致（数据校验由 host 业务层负责）。
 const REMOTE_PACKAGE = 'dsh-diff-review'
 const REMOTE_SERVICE = 'diffReview'
-const srcJson = { mode: 'src-json' }
+const passthroughSchema = { _zod: {}, parse: (v) => v, safeParse: (v) => ({ success: true, data: v }) }
+const strictJson = { mode: 'strict', typeSymbol: 'dsh-diff-review#json', schema: passthroughSchema }
+const agentStrict = { mode: 'strict', typeSymbol: '@deepseek-ai/dsh-session/types#SessionId', schema: passthroughSchema }
 function descriptor(method) {
   return {
     id: REMOTE_PACKAGE + '#' + REMOTE_SERVICE + '/' + method,
@@ -16,10 +22,10 @@ function descriptor(method) {
     invocation: { kind: 'direct' },
     scope: { context: 'agent', wire: 'agentId' },
     parameters: [
-      { name: 'agent', wire: 'agentId', source: 'lookup', lookup: 'agent', codec: srcJson },
-      { name: 'request', wire: 'request', source: 'json', codec: srcJson },
+      { name: 'agent', wire: 'agentId', source: 'lookup', lookup: 'agent', codec: agentStrict },
+      { name: 'request', wire: 'request', source: 'json', codec: strictJson },
     ],
-    result: srcJson,
+    result: strictJson,
   }
 }
 const TYPERT_REMOTE = {
@@ -32,18 +38,38 @@ let pluginCtx = null
 let remoteNs = null
 async function initRemote() {
   if (remoteNs) return remoteNs
-  if (!pluginCtx || !pluginCtx.remote) throw new Error('dsh-diff-review: client remote service unavailable')
-  await pluginCtx.remote.$mount(TYPERT_REMOTE)
+  if (!pluginCtx || !pluginCtx.remote) {
+    const e = new Error('dsh-diff-review: client remote service unavailable')
+    console.error('[dsh-diff-review] initRemote 失败: remote 服务不可用', e)
+    throw e
+  }
+  try {
+    await pluginCtx.remote.$mount(TYPERT_REMOTE)
+  } catch (e) {
+    console.error('[dsh-diff-review] initRemote 失败: $mount 抛错（descriptors=' + TYPERT_REMOTE.descriptors.length + '）', e)
+    throw e
+  }
   remoteNs = pluginCtx.get('remote.' + REMOTE_SERVICE)
-  if (!remoteNs) throw new Error('dsh-diff-review: diffReview remote unavailable')
+  if (!remoteNs) {
+    const e = new Error('dsh-diff-review: diffReview remote unavailable')
+    console.error('[dsh-diff-review] initRemote 失败: get(remote.diffReview) 返回空', e)
+    throw e
+  }
   return remoteNs
 }
 
 // callHost：唯一通道 = typert RPC（agent 由运行时注入，会话绑定不可伪造）。
-// 失败直接抛出：typert 未就绪即宿主未加载插件/版本过旧，交由调用方显示"宿主未连接"
+// 宿主 client runtime 把 descriptor 的 lookup 参数（agent）也算进调用参数位
+// （"expected 2 argument(s), got 1"）——第 1 参传 undefined 占位，wire 层按 scope
+// lookup 注入真实 agent（host 侧方法签名为 (agent, request)）。
 async function callHost(action, args) {
-  const ns = await initRemote()
-  return await ns[action](args || {})
+  try {
+    const ns = await initRemote()
+    return await ns[action](undefined, args || {})
+  } catch (e) {
+    console.error('[dsh-diff-review] callHost(' + action + ') 失败:', e)
+    throw e
+  }
 }
 
 let styleTag = null

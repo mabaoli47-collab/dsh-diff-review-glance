@@ -14,9 +14,15 @@ const agentCodec = {
   schema: z.intersection(z.string(), z.unknown()),
 }
 
-// request/result 走 src-json（边界 JSON 透传；内部业务已做校验），
-// 避免为每个动作维护完整 zod schema——wire 契约仍由 method 名 + JSON 结构约束。
-const srcJson = { mode: 'src-json' }
+// request/result 必须用 strict codec：宿主的 client loader（requireStrictCodec）拒绝
+// src-json（"field result has no strict codec"）。用 z.any() 保持透传语义——
+// 数据校验仍由 host 业务层负责，wire 契约由 method 名 + JSON 结构约束。
+// （修复 0.16.2 诊断：client mount 报 result/parameter 无 strict codec）
+const passJson = {
+  mode: 'strict',
+  typeSymbol: 'dsh-diff-review#json',
+  schema: z.any(),
+}
 
 /** Build one direct invocation descriptor for a service method. */
 function descriptor(method) {
@@ -29,9 +35,9 @@ function descriptor(method) {
     scope: { context: 'agent', wire: 'agentId' },
     parameters: [
       { name: 'agent', wire: 'agentId', source: 'lookup', lookup: 'agent', codec: agentCodec },
-      { name: 'request', wire: 'request', source: 'json', codec: srcJson },
+      { name: 'request', wire: 'request', source: 'json', codec: passJson },
     ],
-    result: srcJson,
+    result: passJson,
   }
 }
 
