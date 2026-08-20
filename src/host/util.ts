@@ -274,17 +274,17 @@ export function parseGitignore(text) {
   return rules
 }
 /**
- * 判断相对路径（/ 分隔）是否被 gitignore 忽略。
- * 返回 true=应忽略。isDir 标识该路径是目录（目录模式的尾部 / 规则可匹配目录本体）。
+ * 单层规则匹配结果：'ignore'=忽略 / 'reinclude'=! 取反不忽略 / null=无规则命中。
+ * isDir 标识该路径是目录（目录模式的尾部 / 规则可匹配目录本体）。
  * 对路径的每个前缀（目录）与全路径逐一测试规则，后出现的规则覆盖先出现的（! 取反）。
  */
-export function gitignoreMatch(rules, relPath, isDir) {
-  if (!rules || rules.length === 0) return false
+export function gitignoreMatchResult(rules, relPath, isDir) {
+  if (!rules || rules.length === 0) return null
   const segments = String(relPath).split('/')
   const candidates = []
   for (let i = 1; i <= segments.length; i++) candidates.push(segments.slice(0, i).join('/'))
   const last = candidates.length - 1 // 全路径（目录本体或文件）下标
-  let ignored = false
+  let ignored = null
   for (const rule of rules) {
     let hit = false
     for (let ci = 0; ci < candidates.length; ci++) {
@@ -292,7 +292,34 @@ export function gitignoreMatch(rules, relPath, isDir) {
       if (rule.dirOnly && ci === last && !isDir) continue
       if (rule.re.test(candidates[ci])) { hit = true; break }
     }
-    if (hit) ignored = !rule.negate
+    if (hit) ignored = rule.negate ? 'reinclude' : 'ignore'
+  }
+  return ignored
+}
+/** 单层匹配：返回 true=应忽略（gitignoreMatchResult === 'ignore'） */
+export function gitignoreMatch(rules, relPath, isDir) {
+  return gitignoreMatchResult(rules, relPath, isDir) === 'ignore'
+}
+/**
+ * 分层匹配：layers = [{ base, rules }]，base 为该 .gitignore 所在目录的相对路径
+ * （'' = 工作区根），数组按"根→深"排序。每层的规则只作用于其子树（文件相对该层
+ * 目录的路径），深层的 ! 取反可覆盖浅层的忽略（git 语义：深层规则优先）。
+ * 返回 true=应忽略。
+ */
+export function gitignoreMatchLayered(layers, relPath, isDir) {
+  if (!layers || layers.length === 0) return false
+  const rel = String(relPath)
+  let ignored = false
+  for (const layer of layers) {
+    if (!layer.rules || layer.rules.length === 0) continue
+    let sub
+    if (layer.base === '') sub = rel
+    else if (rel === layer.base) continue // 目录本体由父层规则判定
+    else if (rel.indexOf(layer.base + '/') === 0) sub = rel.slice(layer.base.length + 1)
+    else continue // 不在该层子树内
+    const r = gitignoreMatchResult(layer.rules, sub, isDir)
+    if (r === 'ignore') ignored = true
+    else if (r === 'reinclude') ignored = false
   }
   return ignored
 }

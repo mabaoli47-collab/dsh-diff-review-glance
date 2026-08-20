@@ -58,7 +58,8 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 | `primeMaxChars` | 基线预读字符预算（单位 MB） | `48` |
 | `detectMode` | 检测模式：`turn`=回合结束刷新（默认，跨平台）；`live`=实时预览（fs.watch 监听，仅 Windows，非 Windows 自动回退 turn） | `turn` |
 | `liveRevert` | 实时预览项允许直接撤销（默认关闭；开启后 live 项显示撤销按钮，带版本冲突保护——进行中文件可能仍被 AI 改写，存在两个写者竞态，建议在 AI 停笔时撤销） | `false` |
-| `respectGitignore` | 尊重工作区根 `.gitignore`（默认开启：被忽略的文件不读入基线、不产生审阅项、不可撤销；关闭后恢复仅名单过滤） | `true` |
+| `respectGitignore` | 尊重 `.gitignore`（默认开启：根 + 各层 `.gitignore` 及用户自配忽略文件中被忽略的文件不读入基线、不产生审阅项、不可撤销；关闭后恢复仅名单过滤） | `true` |
+| `extraIgnoreFiles` | 自定义忽略文件路径（每行一个，可工作区外；.gitignore 格式，作为基础忽略层，纯只读匹配） | 空 |
 
 配置写入 `~/.dsh/settings.yaml`（命名空间 `dsh-diff-review`）。数字项填 `0` 或非法值回退默认。
 
@@ -74,7 +75,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 
 本插件属于**高权限本地开发工具**，安装前请知悉其实际能力：
 
-- **读取当前工作区文件内容**：为建立文件版本基线并检测修改，插件会遍历并预读工作区文本（默认排除 `.env*`、`*.pem` / `*.key` / `*.p12` / `*.pfx` / `*.crt` / `*.keystore`、`credentials.*`、`secrets.*`、`config.local.*`、SSH 私钥（`id_rsa`/`id_ed25519` 等无扩展名）、`.netrc` / `.npmrc` / `.git-credentials` / `.pgpass` / `htpasswd`，以及 `.ssh/` `.aws/` `.gnupg/` `.kube/` 目录——**best-effort 名单，非安全保证**；v0.11 起**工作区根 `.gitignore` 中忽略的文件同样被排除**——用户显式声明不跟踪的文件不读入基线、不产生审阅项、不可撤销，覆盖名单外的自定义敏感文件；仅支持根 `.gitignore`，嵌套 `.gitignore` 暂不支持）；
+- **读取当前工作区文件内容**：为建立文件版本基线并检测修改，插件会遍历并预读工作区文本（默认排除 `.env*`、`*.pem` / `*.key` / `*.p12` / `*.pfx` / `*.crt` / `*.keystore`、`credentials.*`、`secrets.*`、`config.local.*`、SSH 私钥（`id_rsa`/`id_ed25519` 等无扩展名）、`.netrc` / `.npmrc` / `.git-credentials` / `.pgpass` / `htpasswd`，以及 `.ssh/` `.aws/` `.gnupg/` `.kube/` 目录——**best-effort 名单，非安全保证**；v0.11 起**`.gitignore` 中忽略的文件同样被排除**：v0.13 起读取**根 + 各层 `.gitignore`**（含嵌套仓库自己的，各管各的子树、深层规则优先），用户显式声明不跟踪的文件不读入基线、不产生审阅项、不可撤销；另可经 `extraIgnoreFiles` 自配**工作区外**的忽略文件（**读取范围因此扩展到用户指定路径**，仅只读解析、不展示不执行）；
 - **实时监听工作区（live 模式）**：`detectMode=live` 时，宿主进程经 **`node:fs` 的 `fs.watch` 直接监听工作区文件系统事件**（这是对 dsh fs 服务沙箱的只读旁路：事件本身不含文件内容，仅作为「重新比对」的触发器，内容读取仍走受沙箱约束的 fs 服务）；
 - **写回工作区文件**：「撤销 / 重做」（以及开启 `liveRevert` 后**实时预览项的撤销**）会把文件恢复为审阅前的版本（带版本冲突检测——文件被外部修改时会拒绝写回而非覆盖）；
 - **启动外部进程**：「其他打开方式」会以完整沙箱访问（`danger-full-access`）启动**你配置**的编辑器（VS Code / VS2022）或资源管理器（`explorer.exe` / `open -R` / `xdg-open`）——正式审阅项与实时预览项均可触发，仅在你主动点击时发生；
@@ -86,7 +87,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 
 本插件已做路径边界、命令注入、TOCTOU/版本冲突等防护，但以下**残余风险与条件性风险**需明确知悉：
 
-- **敏感文件过滤是 best-effort，非安全保证**：默认排除名单基于文件名/后缀匹配；无标准后缀的密钥（如直接命名为 `secret` / `token`）、压缩/编码后的凭据文件（如 `id_rsa.zip`、`cert.base64`）不会命中名单，可能被读入基线缓存并展示 diff。**加强防线（v0.11）**：工作区根 `.gitignore` 中忽略的文件一律不读入基线、不产生审阅项——把自定义敏感文件加入 `.gitignore` 即可获得等价保护（仅支持根 `.gitignore`，嵌套暂不支持）。**请勿在包含此类文件的工作区中使用本插件，或将敏感文件置于忽略范围之外**。
+- **敏感文件过滤是 best-effort，非安全保证**：默认排除名单基于文件名/后缀匹配；无标准后缀的密钥（如直接命名为 `secret` / `token`）、压缩/编码后的凭据文件（如 `id_rsa.zip`、`cert.base64`）不会命中名单，可能被读入基线缓存并展示 diff。**加强防线（v0.11/v0.13）**：`respectGitignore` 开启时，**根 + 各层 `.gitignore`（含嵌套仓库自己的）** 中忽略的文件一律不读入基线、不产生审阅项——把自定义敏感文件加入任意一层 `.gitignore` 即可获得等价保护；另支持 `extraIgnoreFiles` 自配工作区外的忽略文件（基础层，低优先）。**请勿在包含此类文件的工作区中使用本插件，或将敏感文件置于忽略范围之外**。
 - **撤销/重做的 TOCTOU 窗口**：`applyFileWrite` 在路径校验与写入之间存在极短时间窗口；若本地恶意进程恰好在窗口内把目标文件替换为指向工作区外的符号链接，写入可能越界。此威胁源（本地恶意进程）本身已具备文件系统权限，插件无法完全防范。
 - **临时文件权限**：`dsh-dr-tmp-orig-*` 临时文件在 Windows 上受 `%TEMP%` 用户目录（NTFS ACL）隔离保护；但 `chmod 600` 在 Windows/网络文件系统上不保证生效，共享机器或 SMB/NFS 挂载的临时目录下，其他用户可能读取这些包含源代码的临时文件。编辑器打开期间文件保留在磁盘，由 OS 定期清理；插件另登记临时文件并在**创建超过 2 小时后尝试删除**（编辑器仍占用时删除失败被忽略，下轮重试）。
 - **调试工具 `drvw_debug`**：注册为模型工具（仅包含**不写回工作区文件**的调试动作：`state`/`scan`，已移除 `revertAll`；cwd 限制为当前会话工作区；scan 有 2 秒节流，会更新插件自身的基线/缓存状态）。提示注入仍可能诱导模型调用它并向模型暴露当前工作区信息——模型本身已具备工作区文件访问能力，此风险与直接使用 fs/shell 工具相当。
@@ -128,9 +129,9 @@ npm test        # vitest 单元测试（纯函数：路径/边界/敏感名单/d
 | v0.8.0 | **移除过渡 HTTP 路由与 client fetch 回退**——typert 为唯一通信通道，无 HTTP 攻击面（CSRF/DNS 重绑定等配套防护随之删除） |
 | v0.9.0 | **内存自动回收**：空闲工作区（10 分钟无活动）释放 fs.watch 句柄与定时器；`contentCache` 超 40000 条淘汰最旧；git 补读拒绝含 `$`/反引号的文件名（纵深防御） |
 | v0.10.0 | **健壮性**：实时检查挂入 scanChain 串行队列（不与回合扫描并发）；`removeLivePath` 改精确路径匹配（POSIX 大小写敏感）；外部 diff 临时文件 2 小时后自动清理；live 块 UI 标注「工作区级」 |
-| v0.11.0 | **敏感加强（.gitignore）**：工作区根 `.gitignore` 中忽略的文件不读入基线、不产生审阅项、不可撤销（纯函数匹配器 + 单测；仅支持根 `.gitignore`） |
-| v0.11.1 | `.gitignore` 排除改为设置项 **`respectGitignore`**（默认开启，可关闭） |
+| v0.11.0 | **敏感加强（.gitignore）**：工作区根 `.gitignore` 中忽略的文件不读入基线、不产生审阅项、不可撤销（纯函数匹配器 + 单测；仅支持根 `.gitignore`） || v0.11.1 | `.gitignore` 排除改为设置项 **`respectGitignore`**（默认开启，可关闭） |
 | v0.12.0 | **评审修复**：跨会话操作统一为「当前工作区」语义（reviewSession 支持 `targetSessionId` 同工作区校验；getItem 返回错误对象不再卡「加载 diff…」）；live 静默兜底改**指数退避**（空闲不再每 5 秒全量扫描）；`agentSessionId` 显式取值；调试扫描独立会话 + 不推进基线；基线失败可重试；state 比对补 `truncated`/`limits`；渲染期副作用移入 effect；页面隐藏暂停轮询；清理死代码/版本文案 |
+| v0.13.0 | **嵌套 .gitignore + 自定义忽略文件**：遍历读取每一层 `.gitignore`（各管各的子树、深层规则优先、父层规则也作用于嵌套仓库内部——比 git 更保守）；新增设置 `extraIgnoreFiles` 支持工作区外自定义忽略文件（基础层，纯只读匹配） |
 
 ## 许可
 

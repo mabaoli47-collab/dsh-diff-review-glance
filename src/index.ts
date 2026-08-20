@@ -8,7 +8,7 @@ import { dirname, join, posix } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { chmod, unlink } from 'node:fs/promises'
 import { watch } from 'node:fs'
-import { canonCwd, IGNORE_DIRS, norm, relOf, isSensitiveFile, withinRoot, realPathBlocked, shortSessionId, turnKey, splitLines, computeDiff, parseGitignore, gitignoreMatch } from './host/util.js'
+import { canonCwd, IGNORE_DIRS, norm, relOf, isSensitiveFile, withinRoot, realPathBlocked, shortSessionId, turnKey, splitLines, computeDiff, parseGitignore, gitignoreMatchLayered } from './host/util.js'
 import { hostContribution } from './host/typert.js'
 
 export const name = 'dsh-diff-review'
@@ -130,24 +130,57 @@ export function apply(ctx) {
   // targetKey 可能保留大写盘符 C:/...，严格比较会误判越界）；
   // Linux/macOS 大小写敏感文件系统保持精确比较，避免把 /a/Proj 与 /a/proj 误判为同源
   // 实现见 src/host/util.ts（withinRoot / realPathBlocked）
-  // 工作区根 .gitignore 读取（v0.11 敏感加强防线）：用户显式声明不跟踪的文件
-  // 不读入基线、不产生审阅项、不可撤销。仅支持根 .gitignore（嵌套暂不支持）。
-  // 失败（不存在/不可读）返回空规则——不阻断扫描。
-  async function loadGitignoreFor(root) {
+  // 读取单个 .gitignore 文件（不存在/不可读返回 null；超大文件放弃，防 DoS）：
+  // 用于根/各层 .gitignore 与用户自配的外部忽略文件（均只读、只解析、不展示不执行）
+  async function loadGitignoreAt(absPath) {
     try {
-      const t = await fs.resolve(join(root, '.gitignore'))
+      const t = await fs.resolve(absPath)
       const text = await fs.readText(t)
-      return parseGitignore(text)
-    } catch (e) { return [] }
+      if (text.length > 1024 * 1024) return null
+      const rules = parseGitignore(text)
+      return rules.length > 0 ? rules : null
+    } catch (e) { return null }
+  }
+  // 用户自配的外部忽略文件（settings extraIgnoreFiles，每行一个路径，可工作区外）：
+  // 作为 base='' 的基础层（先应用，低优先，仅追加忽略）
+  async function loadExtraIgnoreLayers() {
+    const cfg = readConfig()
+    if (!cfg.respectGitignore) return []
+    const out = []
+    for (const p of cfg.extraIgnoreFiles || []) {
+      const rules = await loadGitignoreAt(p)
+      if (rules) out.push({ base: '', rules })
+    }
+    return out
+  }
+  // 单文件路径：收集"用户指定文件 + 该文件所在目录向上到根"的各层 .gitignore（根→深）
+  async function gitignoreLayersUpTo(s, relPath) {
+    const layers = await loadExtraIgnoreLayers()
+    const rel = String(relPath)
+    const dirs = ['']
+    const segs = rel.split('/')
+    segs.pop() // 去掉文件名，取目录部分
+    let acc = ''
+    for (const seg of segs) { acc = acc ? acc + '/' + seg : seg; dirs.push(acc) }
+    for (const base of dirs) {
+      const absDir = base === '' ? s.cwd : norm(join(s.cwd, base))
+      const own = await loadGitignoreAt(join(absDir, '.gitignore'))
+      if (own) layers.push({ base, rules: own })
+    }
+    return layers
   }
   async function walkWorkspace(root) {
     const out = new Map()
     const seen = new Set()
-    const stack = [{ path: root, depth: 0 }]
     const cfg0 = readConfig()
     const maxFiles = cfg0.maxFiles // 可配置上限（settings → maxFiles）
-    // 根 .gitignore（敏感加强，设置 respectGitignore 可关闭）
-    const gitRules = cfg0.respectGitignore ? await loadGitignoreFor(root) : []
+    // 分层 .gitignore（v0.11 敏感加强 + v0.13 嵌套/外部文件）：每层 .gitignore 管其子树，
+    // 深层规则优先；用户自配外部忽略文件为基础层。设置 respectGitignore 可整体关闭。
+    const respectGi = cfg0.respectGitignore
+    const extraLayers = respectGi ? await loadExtraIgnoreLayers() : []
+    const rootRules = respectGi ? await loadGitignoreAt(join(root, '.gitignore')) : null
+    const baseLayers = extraLayers.concat(rootRules ? [{ base: '', rules: rootRules }] : [])
+    const stack = [{ path: root, depth: 0, layers: baseLayers }]
     let truncated = false
     while (stack.length > 0 && !truncated) {
       const cur = stack.pop()
@@ -170,9 +203,16 @@ export function apply(ctx) {
           try { dTarget = await fs.resolve(e.target.displayPath) } catch (err) { continue }
           if (!withinRoot(root, dTarget.targetKey)) continue
           if (realPathBlocked(dTarget.targetKey)) continue
-          // gitignore 目录命中：整个目录不深入
-          if (gitignoreMatch(gitRules, relOf(dTarget.displayPath, { cwd: root }), true)) continue
-          stack.push({ path: dTarget.displayPath, depth: cur.depth + 1 })
+          // gitignore 目录命中：整个目录不深入（用当前目录的规则链判断）
+          if (gitignoreMatchLayered(cur.layers, relOf(dTarget.displayPath, { cwd: root }), true)) continue
+          // 子目录自己的 .gitignore 追加为层（管该子目录子树）
+          let childLayers = cur.layers
+          if (respectGi) {
+            const subRel = relOf(dTarget.displayPath, { cwd: root })
+            const own = await loadGitignoreAt(join(dTarget.displayPath, '.gitignore'))
+            if (own) childLayers = cur.layers.concat([{ base: subRel, rules: own }])
+          }
+          stack.push({ path: dTarget.displayPath, depth: cur.depth + 1, layers: childLayers })
         } else if (e.type === 'file') {
           if (e.name.indexOf('dsh-dr-tmp-') === 0) continue
           // 文件级 symlink/junction 越界防护：listDir 可能把指向工作区外的
@@ -186,8 +226,8 @@ export function apply(ctx) {
           // 用真实 basename 重判 + 真实路径段忽略检查
           const realName = fTarget.displayPath.split('/').pop() || e.name
           if (isSensitiveFile(realName) || realPathBlocked(fTarget.targetKey)) continue
-          // gitignore 文件命中：不读入基线、不产生审阅项
-          if (gitignoreMatch(gitRules, relOf(fTarget.displayPath, { cwd: root }), false)) continue
+          // gitignore 文件命中：不读入基线、不产生审阅项（分层规则链）
+          if (gitignoreMatchLayered(cur.layers, relOf(fTarget.displayPath, { cwd: root }), false)) continue
           let ver = e.version
           if (ver === undefined) {
             try {
@@ -413,8 +453,8 @@ export function apply(ctx) {
     if (!withinRoot(s.cwd, target.targetKey)) return false
     const realName = target.displayPath.split('/').pop() || ''
     if (isSensitiveFile(realName) || realPathBlocked(target.targetKey)) return false
-    // gitignore 加强：用户显式忽略的文件不进实时预览（已在 live 桶则移除）；设置可关闭
-    if (readConfig().respectGitignore && gitignoreMatch(await loadGitignoreFor(s.cwd), relOf(target.displayPath, s), false)) {
+    // gitignore 加强（分层 + 用户自配外部文件）：被忽略的文件不进实时预览（已在 live 桶则移除）；设置可关闭
+    if (readConfig().respectGitignore && gitignoreMatchLayered(await gitignoreLayersUpTo(s, relOf(target.displayPath, s)), relOf(target.displayPath, s), false)) {
       s.live.delete(target.displayPath)
       return false
     }
@@ -743,6 +783,7 @@ export function apply(ctx) {
       detectMode: { type: 'string' },
       liveRevert: { type: 'boolean' },
       respectGitignore: { type: 'boolean' },
+      extraIgnoreFiles: { type: 'string' },
     }
     function schema(input) {
       const src = input && typeof input === 'object' ? input : {}
@@ -772,7 +813,8 @@ export function apply(ctx) {
         primeMaxChars: { type: 'number', description: '基线预读字符预算，单位 MB（默认 48）' },
         detectMode: { type: 'string', description: '检测模式：turn=回合结束刷新（默认，跨平台）；live=实时预览（watcher 监听，仅 Windows）' },
         liveRevert: { type: 'boolean', description: '实时预览项允许直接撤销（默认关闭；开启后 live 项显示撤销按钮，带版本冲突保护）' },
-        respectGitignore: { type: 'boolean', description: '尊重工作区根 .gitignore（默认开启：被忽略的文件不读入基线、不产生审阅项、不可撤销）' },
+        respectGitignore: { type: 'boolean', description: '尊重 .gitignore（默认开启：根 + 各层 .gitignore 与用户自配忽略文件中被忽略的文件不读入基线、不产生审阅项、不可撤销）' },
+        extraIgnoreFiles: { type: 'string', description: '自定义忽略文件路径（每行一个，可工作区外；作为基础忽略层，纯只读匹配）' },
       },
     })
     try {
@@ -785,7 +827,7 @@ export function apply(ctx) {
 
   // 读取插件配置（settings.yaml 命名空间 dsh-diff-review）；数字项 0/非法回退默认常量
   function readConfig() {
-    const empty = { code: '', devenv: '', vsDiffMerge: '', maxFiles: MAX_FILES, primeMaxFiles: PRIME_MAX_FILES, primeMaxChars: PRIME_MAX_CHARS, detectMode: 'turn', liveRevert: false, respectGitignore: true }
+    const empty = { code: '', devenv: '', vsDiffMerge: '', maxFiles: MAX_FILES, primeMaxFiles: PRIME_MAX_FILES, primeMaxChars: PRIME_MAX_CHARS, detectMode: 'turn', liveRevert: false, respectGitignore: true, extraIgnoreFiles: [] }
     if (!settingsRegistered) return empty
     try {
       const v = settings.get(CONFIG_NS)
@@ -811,6 +853,8 @@ export function apply(ctx) {
         liveRevert: v.liveRevert === true,
         // 尊重 .gitignore 默认开启（敏感加强）；显式设为 false 才关闭
         respectGitignore: v.respectGitignore !== false,
+        // 用户自配外部忽略文件（换行分隔路径；可工作区外，纯只读匹配）
+        extraIgnoreFiles: typeof v.extraIgnoreFiles === 'string' ? v.extraIgnoreFiles.split(/\r?\n/).map(s => s.trim()).filter(Boolean) : [],
       }
     } catch (e) { return empty }
   }
@@ -1067,6 +1111,13 @@ export function apply(ctx) {
     patch.liveRevert = args.liveRevert === true
     // 尊重 .gitignore 开关（默认开启；显式 false 才关闭）
     patch.respectGitignore = args.respectGitignore !== false
+    // 自定义忽略文件：每行一个路径（可工作区外）；拒绝控制字符（读取走 fs 服务不经 shell）
+    const rawExtra = typeof args.extraIgnoreFiles === 'string' ? args.extraIgnoreFiles : ''
+    const extraList = rawExtra.split(/\r?\n/).map(s => s.trim()).filter(Boolean)
+    for (const p of extraList) {
+      if (/[\u0000-\u001f]/.test(p)) return { ok: false, message: 'extraIgnoreFiles 含控制字符（每行一个路径），已拒绝' }
+    }
+    patch.extraIgnoreFiles = extraList.join('\n')
     return Promise.resolve(settings.update(CONFIG_NS, patch))
       .then(() => {
         // 模式切换后同步各工作区 watcher 状态（live→启动，turn→关闭）；失败标记重置以便重试
@@ -1466,5 +1517,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.12.0），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.13.0），typert 唯一通道（无 HTTP 路由）')
 }

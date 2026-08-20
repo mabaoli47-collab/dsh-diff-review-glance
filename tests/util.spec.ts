@@ -1,7 +1,7 @@
 // Unit tests for the pure host utilities (src/host/util.ts).
 // 覆盖路径规范化、边界校验、敏感文件名单与 diff 算法等纯函数。
 import { describe, expect, it } from 'vitest'
-import { canonCwd, relOf, withinRoot, isSensitiveFile, realPathBlocked, turnKey, shortSessionId, splitLines, computeDiff, parseGitignore, gitignoreMatch } from '../src/host/util.js'
+import { canonCwd, relOf, withinRoot, isSensitiveFile, realPathBlocked, turnKey, shortSessionId, splitLines, computeDiff, parseGitignore, gitignoreMatch, gitignoreMatchLayered } from '../src/host/util.js'
 
 describe('canonCwd', () => {
   it('normalizes separators and trailing slashes', () => {
@@ -153,5 +153,57 @@ describe('gitignore matching', () => {
     const rules = parseGitignore('# comment\n\n*.tmp\n')
     expect(rules.length).toBe(1)
     expect(gitignoreMatch(rules, 'a.tmp')).toBe(true)
+  })
+})
+
+describe('layered gitignore matching', () => {
+  it('applies each layer only to its own subtree', () => {
+    // 模拟 a->b,c,d; b->e,f，其中 a(根)/b/d/e 各有 .gitignore
+    const layers = [
+      { base: '', rules: parseGitignore('*.log\n') },          // a（根）
+      { base: 'b', rules: parseGitignore('secret.txt\n') },    // b
+      { base: 'b/e', rules: parseGitignore('*.tmp\n') },       // e
+      { base: 'd', rules: parseGitignore('data.bin\n') },      // d
+    ]
+    // 根规则作用于整棵子树
+    expect(gitignoreMatchLayered(layers, 'a/x.log', false)).toBe(true)
+    expect(gitignoreMatchLayered(layers, 'b/e/y.log', false)).toBe(true)
+    expect(gitignoreMatchLayered(layers, 'd/z.log', false)).toBe(true)
+    // b 的规则只作用于 b 子树
+    expect(gitignoreMatchLayered(layers, 'b/secret.txt', false)).toBe(true)
+    expect(gitignoreMatchLayered(layers, 'd/secret.txt', false)).toBe(false)
+    // e 的规则作用于 b/e 子树
+    expect(gitignoreMatchLayered(layers, 'b/e/x.tmp', false)).toBe(true)
+    expect(gitignoreMatchLayered(layers, 'b/x.tmp', false)).toBe(false)
+    // d 的规则只作用于 d 子树
+    expect(gitignoreMatchLayered(layers, 'd/data.bin', false)).toBe(true)
+    expect(gitignoreMatchLayered(layers, 'b/data.bin', false)).toBe(false)
+  })
+  it('deeper negation overrides a shallower ignore', () => {
+    const layers = [
+      { base: '', rules: parseGitignore('*.log\n') },
+      { base: 'b', rules: parseGitignore('!keep.log\n') },
+    ]
+    expect(gitignoreMatchLayered(layers, 'b/keep.log', false)).toBe(false)
+    expect(gitignoreMatchLayered(layers, 'b/x.log', false)).toBe(true)
+    expect(gitignoreMatchLayered(layers, 'keep.log', false)).toBe(true)
+  })
+  it('deeper layer ignores a file the root allows', () => {
+    const layers = [
+      { base: '', rules: parseGitignore('*.txt\n!b/special.txt\n') },
+      { base: 'b', rules: parseGitignore('special.txt\n') },
+    ]
+    expect(gitignoreMatchLayered(layers, 'b/special.txt', false)).toBe(true)
+    // 根下的 special.txt 未被 b 层覆盖，仍被根层 *.txt 忽略
+    expect(gitignoreMatchLayered(layers, 'special.txt', false)).toBe(true)
+  })
+  it('directory patterns apply per layer', () => {
+    const layers = [
+      { base: '', rules: parseGitignore('') },
+      { base: 'b', rules: parseGitignore('dist/\n') },
+    ]
+    expect(gitignoreMatchLayered(layers, 'b/dist', true)).toBe(true)
+    expect(gitignoreMatchLayered(layers, 'b/dist/a.js', false)).toBe(true)
+    expect(gitignoreMatchLayered(layers, 'dist/a.js', false)).toBe(false)
   })
 })

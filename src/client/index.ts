@@ -270,6 +270,7 @@ function apply(ctx) {
     '.dshdr-cfg-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }\n' +
     '.dshdr-cfg-field input { padding: 6px 8px; border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; background: rgba(128,128,128,0.08); color: inherit; font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }\n' +
     '.dshdr-cfg-field input[type="checkbox"] { width: 16px; height: 16px; padding: 0; border: none; border-radius: 0; background: none; accent-color: #2ea043; }\n' +
+    '.dshdr-cfg-field textarea { padding: 6px 8px; min-height: 44px; width: 100%; box-sizing: border-box; border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; background: rgba(128,128,128,0.08); color: inherit; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical; }\n' +
     '.dshdr-cfg-field input:focus { outline: none; border-color: rgba(46,160,67,0.6); }\n' +
     '.dshdr-cfg-field select { padding: 6px 8px; min-height: 32px; width: 100%; box-sizing: border-box; border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; background: rgba(128,128,128,0.08); color: inherit; font-size: 13px; }\n' +
     '.dshdr-cfg-field select option { background: #1f2328; color: inherit; }\n' +
@@ -605,7 +606,7 @@ function apply(ctx) {
   }
 
   function EditorSettingsView() {
-    const [cfg, setCfg] = React.useState({ code: '', devenv: '', vsDiffMerge: '', maxFiles: 0, primeMaxFiles: 0, primeMaxChars: 0, detectMode: 'turn', liveRevert: false, respectGitignore: true })
+    const [cfg, setCfg] = React.useState({ code: '', devenv: '', vsDiffMerge: '', maxFiles: 0, primeMaxFiles: 0, primeMaxChars: 0, detectMode: 'turn', liveRevert: false, respectGitignore: true, extraIgnoreFiles: '' })
     const [status, setStatus] = React.useState(null)
     React.useEffect(() => {
       let alive = true
@@ -617,6 +618,7 @@ function apply(ctx) {
             detectMode: c.detectMode === 'live' ? 'live' : 'turn',
             liveRevert: !!c.liveRevert,
             respectGitignore: c.respectGitignore !== false,
+            extraIgnoreFiles: (c.extraIgnoreFiles && Array.isArray(c.extraIgnoreFiles)) ? c.extraIgnoreFiles.join('\n') : '',
           })
         }
       }).catch(() => {})
@@ -630,6 +632,7 @@ function apply(ctx) {
           detectMode: cfg.detectMode,
           liveRevert: cfg.liveRevert,
           respectGitignore: cfg.respectGitignore,
+          extraIgnoreFiles: cfg.extraIgnoreFiles || '',
         })
         setStatus(r && r.ok === true ? { ok: true, message: '已保存（标准 settings 注册，写入 settings.yaml）' } : { ok: false, message: (r && r.message) || '保存失败' })
       } catch (e) { setStatus({ ok: false, message: '保存失败' }) }
@@ -652,8 +655,11 @@ function apply(ctx) {
         React.createElement('span', null, '实时预览允许撤销（默认关闭）'),
         React.createElement('input', { type: 'checkbox', checked: cfg.liveRevert, onChange: (e) => setCfg({ ...cfg, liveRevert: e.target.checked }) })),
       React.createElement('label', { className: 'dshdr-cfg-field', key: 'respectGitignore' },
-        React.createElement('span', null, '尊重工作区 .gitignore（默认开启）'),
+        React.createElement('span', null, '尊重 .gitignore（默认开启）'),
         React.createElement('input', { type: 'checkbox', checked: cfg.respectGitignore, onChange: (e) => setCfg({ ...cfg, respectGitignore: e.target.checked }) })),
+      React.createElement('label', { className: 'dshdr-cfg-field', key: 'extraIgnoreFiles' },
+        React.createElement('span', null, '自定义忽略文件（每行一个路径，可工作区外；仅只读匹配）'),
+        React.createElement('textarea', { rows: 2, value: cfg.extraIgnoreFiles || '', placeholder: '如 C:\\Users\\you\\.dsh\\extra-ignore.txt（.gitignore 格式）', onChange: (e) => setCfg({ ...cfg, extraIgnoreFiles: e.target.value }) })),
       React.createElement('h3', null, '外部编辑器路径（留空自动探测）'),
       React.createElement('p', { className: 'dshdr-cfg-desc' }, '通过标准 settings 注册（命名空间 dsh-diff-review），保存后由 settings 服务写入 settings.yaml。配置优先；留空自动探测。'),
       field('code', 'VS Code（code 或 Code.exe 路径）', '如 C:\\Program Files\\Microsoft VS Code\\Code.exe'),
