@@ -45,6 +45,33 @@ ok(hostSrc.includes('v' + pkg.version), 'lib/index.js version mismatch: expected
 const typesSrc = readFileSync(join(root, 'lib/types/index.d.ts'), 'utf8')
 ok(typesSrc.length > 50, 'lib/types/index.d.ts looks empty')
 
+// 7. README config tables must exactly cover the keys returned by
+//    readConfig() (the `empty` defaults in src/index.ts). This guards the
+//    docs/config drift that previously shipped: a README describing ~v0.8
+//    while the code already exposed respectGitignore / extraIgnoreFiles /
+//    trackNewFiles. Missing key => users never learn of the setting;
+//    extra key => docs describe a setting the code does not implement.
+const srcIndex = readFileSync(join(root, 'src/index.ts'), 'utf8')
+const emptyMatch = srcIndex.match(/const empty = \{([^}]*)\}/)
+if (!emptyMatch) {
+  errors.push('cannot locate readConfig() `empty` defaults in src/index.ts')
+} else {
+  const codeKeys = [...new Set([...emptyMatch[1].matchAll(/([A-Za-z][A-Za-z0-9]*)\s*:/g)].map((m) => m[1]))]
+  for (const readme of ['README.md', 'README_EN.md']) {
+    const tableKeys = [...readFileSync(join(root, readme), 'utf8').matchAll(/^\| `([a-z][a-zA-Z0-9]*)` \|/gm)].map((m) => m[1])
+    const missing = codeKeys.filter((k) => !tableKeys.includes(k))
+    const extra = tableKeys.filter((k) => !codeKeys.includes(k))
+    ok(missing.length === 0, readme + ' config table is missing keys: ' + missing.join(', '))
+    ok(extra.length === 0, readme + ' config table lists unknown keys: ' + extra.join(', '))
+  }
+}
+
+// 8. the shipped typert descriptor must expose clearReviewed (the current
+//    wire contract); a regression to a stale descriptor would silently
+//    drop the action from the client.
+const typertSrc = readFileSync(join(root, 'lib/host/typert.js'), 'utf8')
+ok(typertSrc.includes('clearReviewed'), 'lib/host/typert.js missing clearReviewed descriptor')
+
 if (errors.length > 0) {
   console.error('[verify-pack] FAIL:\n- ' + errors.join('\n- '))
   process.exit(1)
