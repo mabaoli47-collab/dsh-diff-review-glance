@@ -30,6 +30,12 @@ export function apply(ctx) {
   const PRIME_MAX_FILES = 6000
   const PRIME_MAX_CHARS = 48 * 1024 * 1024
   const CONFIG_NS = 'dsh-diff-review'
+  // 空闲资源回收：工作区超过此时间无任何会话活动（getState/回合/实时检查）时，
+  // 释放该 store 的 watcher 句柄与定时器（contentCache/审阅记录保留）
+  const IDLE_RELEASE_MS = 10 * 60 * 1000
+  // contentCache 兜底上限：超限时按插入序淘汰最旧条目（防失控增长；被淘汰文件的
+  // 后续 diff 退回 git 补读或"原始未知"，README 已披露）
+  const CACHE_MAX_ENTRIES = 40000
 
   // 多基线设计：每个工作区（cwd）一个独立状态桶
   const STORES = new Map()
@@ -48,6 +54,9 @@ export function apply(ctx) {
       baselineLoading: false,
       fileMeta: new Map(),
       contentCache: new Map(),
+      // 最近活动时间戳：维护定时器据此释放空闲工作区的 watcher/定时器资源
+      // （页面开着时 getState 每 2 秒刷新；页面关闭、无会话活动超过阈值才释放）
+      lastActivityAt: Date.now(),
       groups: new Map(),
       items: new Map(),
       // 实时预览桶（detectMode='live'，仅 Windows）：watcher 检测到的"进行中"修改，
@@ -224,6 +233,9 @@ export function apply(ctx) {
     // git pathspec 通配符：rel 含 * ? [ 时 git show HEAD:* 会被解释为 glob 匹配
     // （Windows 文件名本不允许这些字符，此处防御类 Unix 文件名场景）
     if (/[*?[\]]/.test(rel)) return null
+    // PowerShell 变量/转义字符（$ 与反引号）：单引号内本不展开，但极端文件名下
+    // 直接放弃 git 补读走 originalMissing 兜底，杜绝任何解析歧义（纵深防御）
+    if (/[$\x60]/.test(rel)) return null
     // 控制字符（含换行）拒绝：杜绝折行/多行命令解析
     if (/[\u0000-\u001f]/.test(rel)) return null
     try {
@@ -325,6 +337,7 @@ export function apply(ctx) {
   }
   async function runLiveCheck(s) {
     if (!s.cwd || readConfig().detectMode !== 'live') return
+    s.lastActivityAt = Date.now()
     if (s.baseline) { try { await s.baseline } catch (e) {} }
     const paths = s._livePendingPaths
     const full = s._liveFull
@@ -457,6 +470,37 @@ export function apply(ctx) {
       if (st.liveTimer) { clearInterval(st.liveTimer); st.liveTimer = null }
       if (st.watcher) { try { st.watcher.close() } catch (e) { /* 忽略 */ } st.watcher = null }
     }
+  })
+
+  // ---- 空闲资源回收（每 60 秒维护一次，随 fiber 卸载清理）----
+  // ① 空闲工作区释放 watcher 句柄与定时器（页面开着时 getState 每 2 秒刷新
+  // lastActivityAt，不会误释放；页面关闭/无会话活动超过 IDLE_RELEASE_MS 才释放，
+  // 重新激活时 getState 的 syncLiveWatcher/ensureLiveFallbackTimer 自动重建）；
+  // ② contentCache 超上限时按插入序淘汰最旧条目（Map 迭代序 = 插入序），兜底防失控增长。
+  function maintainStores() {
+    const now = Date.now()
+    for (const st of STORES.values()) {
+      if (st.lastActivityAt && now - st.lastActivityAt > IDLE_RELEASE_MS) {
+        if (st.watchTimer) { clearTimeout(st.watchTimer); st.watchTimer = null }
+        if (st.liveTimer) { clearInterval(st.liveTimer); st.liveTimer = null }
+        if (st.watcher) { try { st.watcher.close() } catch (e) { /* 忽略 */ } st.watcher = null }
+        st._livePendingPaths = null
+        st._liveFull = false
+      }
+      if (st.contentCache.size > CACHE_MAX_ENTRIES) {
+        const excess = st.contentCache.size - Math.floor(CACHE_MAX_ENTRIES * 0.75)
+        let dropped = 0
+        for (const key of Array.from(st.contentCache.keys())) {
+          if (dropped >= excess) break
+          st.contentCache.delete(key)
+          dropped++
+        }
+      }
+    }
+  }
+  ctx.effect(() => {
+    const timer = setInterval(maintainStores, 60000)
+    return () => clearInterval(timer)
   })
 
   async function scan(s, sessionId, turn) {
@@ -1008,6 +1052,7 @@ export function apply(ctx) {
     const limits = { maxFiles: cfg.maxFiles, primeMaxFiles: cfg.primeMaxFiles, primeMaxChars: cfg.primeMaxChars }
     const curSessionId = args && typeof args.sessionId === 'string' ? args.sessionId : ''
     const s = pickStore(args)
+    if (s) s.lastActivityAt = Date.now()
     // 实时模式：只要会话已登记（store 存在），每次 getState 都确保 watcher 状态与基线
     // 就绪（幂等）——不依赖 agent/status 回合事件，重启后首个 getState 即可启动实时监听
     if (s && cfg.detectMode === 'live') {
@@ -1271,6 +1316,7 @@ export function apply(ctx) {
       label: label || (prev ? prev.label : ''),
     })
     s.session = agent.session
+    s.lastActivityAt = Date.now()
     active = s
     if (typeof turn === 'number' && turn > 0) {
       SESSIONS.get(sid).lastTurn = turn
@@ -1329,5 +1375,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.8.0），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.9.0），typert 唯一通道（无 HTTP 路由）')
 }
