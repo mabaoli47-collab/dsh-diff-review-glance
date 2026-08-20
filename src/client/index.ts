@@ -187,12 +187,17 @@ function apply(ctx) {
     // 目标会话经 targetSessionId 显式传递：host 侧 sessionId 由 agent 覆盖（不可伪造），
     // targetSessionId 用于定位目标会话并校验其与当前 agent 同工作区——
     // 修复 typert 迁移期"点 B 会话按钮实际保留 A 会话"的静默错位
-    try { await callHost('reviewSession', Object.assign({}, cwdArg(), { targetSessionId: sessionId })) } catch (e) {}
+    let err = null
+    try {
+      const r = await callHost('reviewSession', Object.assign({}, cwdArg(), { targetSessionId: sessionId }))
+      if (r && r.ok === false && r.message) err = r.message
+    } catch (e) { err = '调用失败' }
     // 前缀精确匹配（startsWith 比 indexOf 切割更稳：item id 为 sessionId::turn::path）
     for (const key of Array.from(detailCache.keys())) {
       if (key.indexOf(sessionId + '::') === 0) detailCache.delete(key)
     }
     await refresh()
+    return err
   }
 
   ctx.effect(() => ctx.interval(() => {
@@ -487,6 +492,7 @@ function apply(ctx) {
     const [snap, setSnap] = React.useState(getSnapshot())
     React.useEffect(() => subscribe(setSnap), [])
     const [open, setOpen] = React.useState(false)
+    const [sessionError, setSessionError] = React.useState(null)
     const pending = (snap && snap.pending) || []
     const pendingCount = (snap && typeof snap.pendingCount === 'number') ? snap.pendingCount : pending.length
     const loading = !!(snap && snap.loading)
@@ -560,7 +566,10 @@ function apply(ctx) {
       sessionBlocks.push(React.createElement('div', { key: sess.id, className: 'dshdr-session' },
         React.createElement('div', { className: 'dshdr-session-head' },
           React.createElement('span', { className: 'dshdr-session-label' }, '会话：' + sess.label + '（' + items.length + ' 项待审阅）'),
-          React.createElement('button', { className: 'dshdr-btn primary', onClick: () => keepSession(sess.id) }, '本会话全部保留')),
+          React.createElement('button', { className: 'dshdr-btn primary', onClick: async () => {
+            const e = await keepSession(sess.id)
+            if (e) setSessionError(e)
+          } }, '本会话全部保留')),
         React.createElement('div', { className: 'dshdr-list' },
           items.map(item => React.createElement(ItemRow, { key: item.id, item, showTurn: true })))))
     }
@@ -568,6 +577,7 @@ function apply(ctx) {
       head,
       React.createElement('div', { className: 'dshdr-turn' },
         wsHead,
+        sessionError ? React.createElement('div', { className: 'dshdr-error', style: { padding: '2px 10px' } }, sessionError) : null,
         liveStatus,
         truncated ? React.createElement('div', { className: 'dshdr-loading' }, '工作区文件数超上限（当前上限 ' + ((snap && snap.limits && snap.limits.maxFiles) || 20000) + ' 个文件），扫描已截断（部分文件未覆盖）。可在 设置 → Diff 审阅插件 调整上限') : null,
         liveBlock,

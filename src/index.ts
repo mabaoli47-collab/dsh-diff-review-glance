@@ -141,21 +141,39 @@ export function apply(ctx) {
       return rules.length > 0 ? rules : null
     } catch (e) { return null }
   }
+  // .gitignore 规则层缓存（store 级，TTL 30 秒）：gitignore 极少变化，避免每次
+  // 扫描/实时检查对同一目录重复读盘。key = 规范化绝对目录路径。
+  async function cachedGitignoreRules(s, absDirPath) {
+    if (!s._giCache) s._giCache = new Map()
+    const key = canonCwd(absDirPath)
+    const hit = s._giCache.get(key)
+    if (hit && Date.now() - hit.at < 30000) return hit.rules
+    const rules = await loadGitignoreAt(join(absDirPath, '.gitignore'))
+    const val = rules || []
+    if (s._giCache.size > 20000) s._giCache.clear() // 缓存兜底上限
+    s._giCache.set(key, { rules: val, at: Date.now() })
+    return val
+  }
   // 用户自配的外部忽略文件（settings extraIgnoreFiles，每行一个路径，可工作区外）：
-  // 作为 base='' 的基础层（先应用，低优先，仅追加忽略）
-  async function loadExtraIgnoreLayers() {
+  // 作为 base='' 的基础层（先应用，低优先，仅追加忽略）；store 级 TTL 缓存
+  async function cachedExtraLayers(s) {
+    if (s._extraLayers && s._extraLayersAt && Date.now() - s._extraLayersAt < 30000) return s._extraLayers
+    const layers = []
     const cfg = readConfig()
-    if (!cfg.respectGitignore) return []
-    const out = []
-    for (const p of cfg.extraIgnoreFiles || []) {
-      const rules = await loadGitignoreAt(p)
-      if (rules) out.push({ base: '', rules })
+    if (cfg.respectGitignore) {
+      for (const p of cfg.extraIgnoreFiles || []) {
+        const rules = await loadGitignoreAt(p)
+        if (rules) layers.push({ base: '', rules })
+        else if (p) console.warn('[dsh-diff-review] 自定义忽略文件不可读（已跳过）:', p)
+      }
     }
-    return out
+    s._extraLayers = layers
+    s._extraLayersAt = Date.now()
+    return layers
   }
   // 单文件路径：收集"用户指定文件 + 该文件所在目录向上到根"的各层 .gitignore（根→深）
   async function gitignoreLayersUpTo(s, relPath) {
-    const layers = await loadExtraIgnoreLayers()
+    const layers = await cachedExtraLayers(s)
     const rel = String(relPath)
     const dirs = ['']
     const segs = rel.split('/')
@@ -164,23 +182,25 @@ export function apply(ctx) {
     for (const seg of segs) { acc = acc ? acc + '/' + seg : seg; dirs.push(acc) }
     for (const base of dirs) {
       const absDir = base === '' ? s.cwd : norm(join(s.cwd, base))
-      const own = await loadGitignoreAt(join(absDir, '.gitignore'))
-      if (own) layers.push({ base, rules: own })
+      const own = await cachedGitignoreRules(s, absDir)
+      if (own.length > 0) layers.push({ base, rules: own })
     }
     return layers
   }
-  async function walkWorkspace(root) {
+  async function walkWorkspace(s) {
+    const root = s.cwd
     const out = new Map()
     const seen = new Set()
     const cfg0 = readConfig()
     const maxFiles = cfg0.maxFiles // 可配置上限（settings → maxFiles）
     // 分层 .gitignore（v0.11 敏感加强 + v0.13 嵌套/外部文件）：每层 .gitignore 管其子树，
     // 深层规则优先；用户自配外部忽略文件为基础层。设置 respectGitignore 可整体关闭。
+    // 存在性经 entries 判断（无 .gitignore 的目录零额外 IO）；规则层按目录 TTL 缓存。
     const respectGi = cfg0.respectGitignore
-    const extraLayers = respectGi ? await loadExtraIgnoreLayers() : []
-    const rootRules = respectGi ? await loadGitignoreAt(join(root, '.gitignore')) : null
-    const baseLayers = extraLayers.concat(rootRules ? [{ base: '', rules: rootRules }] : [])
-    const stack = [{ path: root, depth: 0, layers: baseLayers }]
+    const extraLayers = respectGi ? await cachedExtraLayers(s) : []
+    const rootRules = respectGi ? await cachedGitignoreRules(s, root) : []
+    const baseLayers = extraLayers.concat(rootRules.length > 0 ? [{ base: '', rules: rootRules }] : [])
+    const stack = [{ path: root, depth: 0, parentLayers: baseLayers }]
     let truncated = false
     while (stack.length > 0 && !truncated) {
       const cur = stack.pop()
@@ -194,6 +214,18 @@ export function apply(ctx) {
       seen.add(seenKey)
       let entries
       try { entries = await fs.listDir(target) } catch (e) { continue }
+      // 本目录层：从 entries 识别 .gitignore 文件条目（无需额外 resolve 探测存在性）
+      let layers = cur.parentLayers
+      if (respectGi && cur.depth > 0) {
+        const giEntry = entries.find(x => x.type === 'file' && x.name === '.gitignore')
+        if (giEntry) {
+          const own = await cachedGitignoreRules(s, cur.path)
+          if (own.length > 0) {
+            const base = relOf(cur.path, s)
+            if (base !== '.') layers = cur.parentLayers.concat([{ base, rules: own }])
+          }
+        }
+      }
       for (let k = entries.length - 1; k >= 0; k--) {
         const e = entries[k]
         if (e.type === 'directory') {
@@ -204,15 +236,8 @@ export function apply(ctx) {
           if (!withinRoot(root, dTarget.targetKey)) continue
           if (realPathBlocked(dTarget.targetKey)) continue
           // gitignore 目录命中：整个目录不深入（用当前目录的规则链判断）
-          if (gitignoreMatchLayered(cur.layers, relOf(dTarget.displayPath, { cwd: root }), true)) continue
-          // 子目录自己的 .gitignore 追加为层（管该子目录子树）
-          let childLayers = cur.layers
-          if (respectGi) {
-            const subRel = relOf(dTarget.displayPath, { cwd: root })
-            const own = await loadGitignoreAt(join(dTarget.displayPath, '.gitignore'))
-            if (own) childLayers = cur.layers.concat([{ base: subRel, rules: own }])
-          }
-          stack.push({ path: dTarget.displayPath, depth: cur.depth + 1, layers: childLayers })
+          if (gitignoreMatchLayered(layers, relOf(dTarget.displayPath, { cwd: root }), true)) continue
+          stack.push({ path: dTarget.displayPath, depth: cur.depth + 1, parentLayers: layers })
         } else if (e.type === 'file') {
           if (e.name.indexOf('dsh-dr-tmp-') === 0) continue
           // 文件级 symlink/junction 越界防护：listDir 可能把指向工作区外的
@@ -227,7 +252,7 @@ export function apply(ctx) {
           const realName = fTarget.displayPath.split('/').pop() || e.name
           if (isSensitiveFile(realName) || realPathBlocked(fTarget.targetKey)) continue
           // gitignore 文件命中：不读入基线、不产生审阅项（分层规则链）
-          if (gitignoreMatchLayered(cur.layers, relOf(fTarget.displayPath, { cwd: root }), false)) continue
+          if (gitignoreMatchLayered(layers, relOf(fTarget.displayPath, { cwd: root }), false)) continue
           let ver = e.version
           if (ver === undefined) {
             try {
@@ -249,10 +274,11 @@ export function apply(ctx) {
     s.baselineLoading = true
     s.baseline = (async () => {
       try {
-        const { meta, truncated } = await walkWorkspace(s.cwd)
+        const { meta, truncated } = await walkWorkspace(s)
         s.truncated = truncated
         s.walkFileCount = meta.size
         s.fileMeta = meta
+        s.baselineError = null // 重试成功后清除旧错误（drvw_debug 不再显示过期错误）
         const cfg = readConfig()
         let budget = cfg.primeMaxChars
         let count = 0
@@ -355,6 +381,7 @@ export function apply(ctx) {
         s.watcher = w
         s.watchFailedAt = 0
         s.watchError = ''
+        s._fallbackMs = 5000 // 重建 watcher 时复位兜底退避（避免停在 80s 导致首次兜底最长延迟 80s）
         ensureLiveFallbackTimer(s)
       } catch (e) {
         s.watchFailedAt = Date.now()
@@ -466,7 +493,7 @@ export function apply(ctx) {
   // 目录级/无文件名事件：全量兜底对比 + 清理已消失的 live 项 + 新文件读缓存
   async function checkLiveAll(s) {
     let walk
-    try { walk = await walkWorkspace(s.cwd) } catch (e) { return false }
+    try { walk = await walkWorkspace(s) } catch (e) { return false }
     const meta = walk.meta
     let changed = false
     for (const [path, info] of meta) {
@@ -579,6 +606,7 @@ export function apply(ctx) {
         if (st.watcher) { try { st.watcher.close() } catch (e) { /* 忽略 */ } st.watcher = null }
         st._livePendingPaths = null
         st._liveFull = false
+        st._fallbackMs = 5000 // 释放时复位退避，重建后立即恢复 5s 兜底
       }
       if (st.contentCache.size > CACHE_MAX_ENTRIES) {
         const excess = st.contentCache.size - Math.floor(CACHE_MAX_ENTRIES * 0.75)
@@ -604,26 +632,28 @@ export function apply(ctx) {
 
   async function scan(s, sessionId, turn, opts) {
     if (!s.cwd) return
-    // trackMeta=false（调试扫描）：不推进 fileMeta 基线——否则调试扫描会把真实回合的
-    // 变更"偷走"（下一回合 scan 因基线已推进而无变更可记），且落组归属独立 sessionId
-    const trackMeta = !(opts && opts.trackMeta === false)
+    // dryRun=true（调试预览扫描）：只统计变更，不写 items/groups/contentCache/fileMeta、
+    // 不推进 rev——否则调试扫描会把 contentCache 覆盖为当前内容，真实回合的审阅项
+    // 会因 original===current 被静默跳过（会话前原文丢失），并残留不可见的幽灵项。
+    // 参见 README：drvw_debug 的 scan 为纯预览，绝不修改插件内部审阅状态。
+    const dryRun = !!(opts && opts.dryRun)
     s.scanning = true
     try {
       if (s.baseline) { try { await s.baseline } catch (e) {} }
       s.scanCount++
       let walk
-      try { walk = await walkWorkspace(s.cwd) } catch (e) { s.lastError = 'walk: ' + ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e); return }
+      try { walk = await walkWorkspace(s) } catch (e) { s.lastError = 'walk: ' + ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e); return }
       const meta = walk.meta
       s.truncated = walk.truncated
       s.walkFileCount = meta.size
-      const group = getGroup(s, sessionId, turn)
+      const group = dryRun ? null : getGroup(s, sessionId, turn)
       const changed = []
       try {
         for (const [path, info] of meta) {
           const prev = s.fileMeta.get(path)
           if (prev && prev.version === info.version) continue
           if (!prev) {
-            if (info.size === undefined || info.size <= CACHE_NEW_BYTES) {
+            if (!dryRun && (info.size === undefined || info.size <= CACHE_NEW_BYTES)) {
               try { s.contentCache.set(path, await fs.readText(info.target)) } catch (e) { /* 二进制或不可读 */ }
             }
             continue
@@ -640,12 +670,12 @@ export function apply(ctx) {
             // 该原文只用于 diff 展示，item 标记 gitOriginal 以禁止 revert（避免吞掉未提交工作）
             original = await readOriginalFromGit(s, path)
             if (typeof original === 'string') {
-              s.contentCache.set(path, original)
+              if (!dryRun) s.contentCache.set(path, original)
               gitOriginal = true
             }
           }
           if (original !== undefined && original === current) {
-            s.contentCache.set(path, current)
+            if (!dryRun) s.contentCache.set(path, current)
             continue
           }
           changed.push({ path, info, original: original === undefined ? null : original, current, gitOriginal })
@@ -674,17 +704,21 @@ export function apply(ctx) {
             hunks: diff.hunks,
             degraded: !!diff.degraded,
           }
-          s.items.set(id, item)
-          group.items.set(c.path, item)
-          s.contentCache.set(c.path, c.current)
+          if (!dryRun) {
+            s.items.set(id, item)
+            group.items.set(c.path, item)
+            s.contentCache.set(c.path, c.current)
+          }
         }
         const nextMeta = new Map()
         for (const [p, info] of meta) nextMeta.set(p, info)
-        if (trackMeta) s.fileMeta = nextMeta
-        for (const p of Array.from(s.contentCache.keys())) {
-          if (!nextMeta.has(p)) s.contentCache.delete(p)
+        if (!dryRun) {
+          s.fileMeta = nextMeta
+          for (const p of Array.from(s.contentCache.keys())) {
+            if (!nextMeta.has(p)) s.contentCache.delete(p)
+          }
+          if (changed.length > 0) s.rev++
         }
-        if (changed.length > 0) s.rev++
       } catch (e) {
         s.lastError = 'scan: ' + ((e && e.message) || String(e))
         console.error('[dsh-diff-review] scan 处理失败', e)
@@ -734,6 +768,16 @@ export function apply(ctx) {
     if (action === 'keep') {
       if (item.status === 'pending') { item.status = 'kept'; s.rev++ }
       return { ok: true, status: item.status }
+    }
+    if (action === 'revert' || action === 'redo') {
+      // 写入前校验：文件当前是否已被 .gitignore 忽略（item 可能在文件加入忽略前已创建）。
+      // 被忽略的文件不产生审阅项、也不应被撤销/重做触碰（与"忽略=不跟踪"语义一致）
+      if (readConfig().respectGitignore) {
+        const rel = relOf(item.file, s)
+        if (gitignoreMatchLayered(await gitignoreLayersUpTo(s, rel), rel, false)) {
+          return { ok: false, error: 'gitignored', message: '该文件现已被 .gitignore 忽略，禁止撤销/重做' }
+        }
+      }
     }
     if (action === 'revert') {
       // gitOriginal：原文来自 git HEAD（可能 ≠ 会话开始前内容，会话前可能有未提交本地修改），
@@ -1269,7 +1313,7 @@ export function apply(ctx) {
   if (tools && typeof tools.register === 'function') {
     const debugTool = defineTool({
       name: 'drvw_debug',
-      description: '读取「对话修改审阅」插件（drvw）的内部状态并支持调试动作：action=state 返回状态（默认，可指定 cwd 参数查看特定工作区）；action=scan 立即执行一次扫描（自动引导基线，使用 lastTurn+1 作为回合号）。仅包含不写回工作区文件的调试动作（scan 会更新插件自身的基线/缓存状态）；cwd 必须等于当前会话工作区。',
+      description: '读取「对话修改审阅」插件（drvw）的内部状态并支持调试动作：action=state 返回状态（默认，可指定 cwd 参数查看特定工作区）；action=scan 立即执行一次预览扫描（完全 dry-run：只统计变更，不写 items/groups/contentCache/基线、不推进 rev）。仅包含不修改插件审阅状态的只读调试动作；cwd 必须等于当前会话工作区。',
       // ParameterSchemaSpec：扁平属性映射（defineTool 转成 JSON Schema object 根）
       parameters: {
         action: {
@@ -1367,9 +1411,10 @@ export function apply(ctx) {
             s.lastError = 'scan-throttled: 扫描过于频繁，请稍后再试'
           } else {
             s.lastToolScanAt = now
-            // 调试扫描：固定独立 sessionId（'drvw-scan'）+ 不推进基线（trackMeta=false），
-            // 避免把变更记入"未发生的第 N+1 回合"或偷走真实回合的变更
-            const chain = s.scanChain.then(() => scan(s, 'drvw-scan', 0, { trackMeta: false })).catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e) })
+            // 调试扫描 = 完全 dry-run：固定独立 sessionId（'drvw-scan'），只统计变更，
+            // 不写 items/groups/contentCache/fileMeta、不推进 rev——杜绝覆盖基线缓存
+            // 导致真实回合审阅项被静默跳过、或残留不可见的幽灵项
+            const chain = s.scanChain.then(() => scan(s, 'drvw-scan', 0, { dryRun: true })).catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e) })
             s.scanChain = chain
             await chain
           }
@@ -1517,5 +1562,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.13.0），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.14.0），typert 唯一通道（无 HTTP 路由）')
 }

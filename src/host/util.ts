@@ -250,11 +250,18 @@ function gitignorePatternToSource(pattern) {
   }
   return src
 }
-/** 解析 .gitignore 文本 → 规则列表（顺序敏感：后匹配的规则优先，! 取反） */
+/** 单文件 .gitignore 规则条数上限：防巨型忽略文件导致的匹配 DoS（超出即截断） */
+export const MAX_GITIGNORE_RULES = 5000
+/**
+ * 解析 .gitignore 文本 → 规则列表（顺序敏感：后匹配的规则优先，! 取反）。
+ * 健壮性：非法模式（如 [z-a]）逐行 try/catch 丢弃该行、其余规则继续生效——拒绝
+ * 因单条坏模式导致整文件规则被静默丢弃的 fail-open；规则条数超 MAX_GITIGNORE_RULES 截断。
+ */
 export function parseGitignore(text) {
   const rules = []
   const lines = String(text).split(/\r?\n/)
   for (let raw of lines) {
+    if (rules.length >= MAX_GITIGNORE_RULES) break
     raw = raw.replace(/\s+$/, '')
     if (!raw || raw[0] === '#') continue
     let negate = false
@@ -266,9 +273,20 @@ export function parseGitignore(text) {
     if (raw.startsWith('/')) { anchored = true; raw = raw.slice(1) }
     if (!raw) continue
     const hasSlash = raw.indexOf('/') !== -1
+    // 前导 **/ 匹配任意层级（含根级）：编译为可选的前导路径段（git 语义 **/foo 匹配根级 foo）
+    let starStar = false
+    if (raw.startsWith('**/')) { starStar = true; raw = raw.slice(3) }
+    if (!raw) continue
     const body = gitignorePatternToSource(raw)
-    // 无斜杠模式：匹配任意层级同名段（(?:^|/)name$）；含斜杠/锚定：相对根前缀匹配（^a/b($|/)）
-    const re = hasSlash || anchored ? new RegExp('^' + body + '(?:$|/)') : new RegExp('(?:^|/)' + body + '$')
+    let re
+    try {
+      // 无斜杠模式：匹配任意层级同名段（(?:^|/)name$）；含斜杠/锚定：相对根前缀匹配（^a/b($|/)）
+      re = starStar
+        ? new RegExp('^(?:.*/)?' + body + '(?:$|/)')
+        : hasSlash || anchored
+          ? new RegExp('^' + body + '(?:$|/)')
+          : new RegExp('(?:^|/)' + body + '$')
+    } catch (e) { continue } // 坏行丢弃，其余规则继续生效
     rules.push({ negate, dirOnly, re })
   }
   return rules

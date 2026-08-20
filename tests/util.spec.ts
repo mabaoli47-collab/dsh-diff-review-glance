@@ -154,6 +154,24 @@ describe('gitignore matching', () => {
     expect(rules.length).toBe(1)
     expect(gitignoreMatch(rules, 'a.tmp')).toBe(true)
   })
+  it('skips a single broken line instead of failing the whole file', () => {
+    // [z-a] 是非法字符类：坏行被丢弃，其余规则继续生效（拒绝整文件 fail-open）
+    const rules = parseGitignore('*.log\n[z-a]\n*.tmp\n')
+    expect(gitignoreMatch(rules, 'a.log')).toBe(true)
+    expect(gitignoreMatch(rules, 'a.tmp')).toBe(true)
+    expect(rules.length).toBe(2)
+  })
+  it('**/ matches the root level too', () => {
+    const rules = parseGitignore('**/foo\n')
+    expect(gitignoreMatch(rules, 'foo')).toBe(true)
+    expect(gitignoreMatch(rules, 'a/foo')).toBe(true)
+    expect(gitignoreMatch(rules, 'a/b/foo')).toBe(true)
+    expect(gitignoreMatch(rules, 'foo2')).toBe(false)
+  })
+  it('caps rule count per file', () => {
+    const rules = parseGitignore(Array.from({ length: 6000 }, (_, i) => 'x' + i + '.tmp').join('\n') + '\n')
+    expect(rules.length).toBeLessThanOrEqual(5000)
+  })
 })
 
 describe('layered gitignore matching', () => {
