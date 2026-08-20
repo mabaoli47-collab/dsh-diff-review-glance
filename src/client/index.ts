@@ -80,7 +80,7 @@ function apply(ctx) {
 
   // 初始 state 补全全部字段：首帧渲染（fetch 尚未返回）时不出现「未知工作区」误导文案，
   // 而是按"未识别"处理，等首次轮询返回后纠正
-  let state = { rev: 0, maxTurn: 0, workspaceId: null, workspaceLabel: '', sessionId: '', sessionKnown: false, loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [] }
+  let state = { rev: 0, maxTurn: 0, workspaceId: null, workspaceLabel: '', sessionId: '', sessionKnown: false, loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [] }
   const subs = new Set()
   const detailCache = new Map()
   let fetching = false
@@ -261,6 +261,7 @@ function apply(ctx) {
     '.dshdr-cfg-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }\n' +
     '.dshdr-cfg-field input { padding: 6px 8px; border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; background: rgba(128,128,128,0.08); color: inherit; font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }\n' +
     '.dshdr-cfg-field input:focus { outline: none; border-color: rgba(46,160,67,0.6); }\n' +
+    '.dshdr-cfg-field select { padding: 6px 8px; border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; background: rgba(128,128,128,0.08); color: inherit; font-size: 13px; }\n' +
     '.dshdr-cfg-actions { display: flex; align-items: center; gap: 10px; }\n' +
     '.dshdr-cfg .dshdr-info, .dshdr-cfg .dshdr-error { padding: 0; }\n' +
     '.dshdr-missing pre { margin: 0; padding: 8px 10px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-family: inherit; font-size: 12px; }\n' +
@@ -382,6 +383,8 @@ function apply(ctx) {
           pane(right, 'right'))))
   }
   function actionsFor(item) {
+    // 实时预览项：只读展示（回合结束后并入正式审阅项才可操作）
+    if (item.live) return []
     // gitOriginal：原文来自 git HEAD 非会话基线，撤销会回退到 HEAD 吞掉未提交工作——仅允许保留
     if (item.originalMissing || item.gitOriginal) return item.status === 'pending' ? [['keep', '保留']] : []
     if (item.status === 'pending') return [['keep', '保留'], ['revert', '撤销']]
@@ -437,7 +440,8 @@ function apply(ctx) {
         disabled: busy,
         onClick: (e) => { e.stopPropagation(); act(a[0]) },
       }, a[1])),
-      React.createElement('button', {
+      // 实时预览项只读：不提供"其他打开方式"（host 侧也拒绝 live 项的外部打开）
+      item.live ? null : React.createElement('button', {
         key: 'open',
         className: 'dshdr-btn',
         disabled: busy,
@@ -507,6 +511,16 @@ function apply(ctx) {
           wsHead,
           React.createElement('div', { className: 'dshdr-loading' }, '扫描工作区中，请稍候…')))
     }
+    // 实时预览块（detectMode='live' 时 host 返回）：进行中的修改，只读展示
+    const liveItems = (snap && snap.live) || []
+    const liveBlock = liveItems.length > 0
+      ? React.createElement('div', { className: 'dshdr-session' },
+          React.createElement('div', { className: 'dshdr-session-head' },
+            React.createElement('span', { className: 'dshdr-session-label' }, '进行中修改（实时预览）'),
+            React.createElement('span', { className: 'dshdr-note' }, '回合结束后并入正式审阅项')),
+          React.createElement('div', { className: 'dshdr-list' },
+            liveItems.map(item => React.createElement(ItemRow, { key: item.id, item, showTurn: false }))))
+      : null
     // 整个工作区、按会话分组（pending 已由 host 按会话最近活动倒序、会话内 turn 倒序排列）
     const sessionBlocks = []
     for (const sess of sessions) {
@@ -524,6 +538,7 @@ function apply(ctx) {
       React.createElement('div', { className: 'dshdr-turn' },
         wsHead,
         truncated ? React.createElement('div', { className: 'dshdr-loading' }, '工作区文件数超上限（当前上限 ' + ((snap && snap.limits && snap.limits.maxFiles) || 20000) + ' 个文件），扫描已截断（部分文件未覆盖）。可在 设置 → Diff 审阅插件 调整上限') : null,
+        liveBlock,
         sessionBlocks.length === 0
           ? React.createElement('div', { className: 'dshdr-loading' }, '暂无待审阅修改')
           : React.createElement('div', null, sessionBlocks)))
@@ -556,7 +571,7 @@ function apply(ctx) {
   }
 
   function EditorSettingsView() {
-    const [cfg, setCfg] = React.useState({ code: '', devenv: '', vsDiffMerge: '', maxFiles: 0, primeMaxFiles: 0, primeMaxChars: 0 })
+    const [cfg, setCfg] = React.useState({ code: '', devenv: '', vsDiffMerge: '', maxFiles: 0, primeMaxFiles: 0, primeMaxChars: 0, detectMode: 'turn' })
     const [status, setStatus] = React.useState(null)
     React.useEffect(() => {
       let alive = true
@@ -565,6 +580,7 @@ function apply(ctx) {
           setCfg({
             code: c.code || '', devenv: c.devenv || '', vsDiffMerge: c.vsDiffMerge || '',
             maxFiles: c.maxFiles || 0, primeMaxFiles: c.primeMaxFiles || 0, primeMaxChars: c.primeMaxChars ? c.primeMaxChars / (1024 * 1024) : 0,
+            detectMode: c.detectMode === 'live' ? 'live' : 'turn',
           })
         }
       }).catch(() => {})
@@ -575,6 +591,7 @@ function apply(ctx) {
         const r = await callHost('saveEditorConfig', {
           code: cfg.code, devenv: cfg.devenv, vsDiffMerge: cfg.vsDiffMerge,
           maxFiles: cfg.maxFiles, primeMaxFiles: cfg.primeMaxFiles, primeMaxChars: cfg.primeMaxChars,
+          detectMode: cfg.detectMode,
         })
         setStatus(r && r.ok === true ? { ok: true, message: '已保存（标准 settings 注册，写入 settings.yaml）' } : { ok: false, message: (r && r.message) || '保存失败' })
       } catch (e) { setStatus({ ok: false, message: '保存失败' }) }
@@ -586,6 +603,13 @@ function apply(ctx) {
       React.createElement('span', null, label),
       React.createElement('input', { type: 'number', min: '0', step: '1', value: cfg[key] || '', placeholder: ph, onChange: (e) => setCfg({ ...cfg, [key]: Number(e.target.value) || 0 }) }))
     return React.createElement('div', { className: 'dshdr-cfg' },
+      React.createElement('h3', null, '检测模式'),
+      React.createElement('p', { className: 'dshdr-cfg-desc' }, '回合结束：每段对话结束后检测文件修改（默认，跨平台）。实时预览：对话进行中即检测并显示只读预览（仅 Windows，watcher 监听工作区；回合结束后并入正式审阅项）。'),
+      React.createElement('label', { className: 'dshdr-cfg-field', key: 'detectMode' },
+        React.createElement('span', null, '检测模式'),
+        React.createElement('select', { value: cfg.detectMode, onChange: (e) => setCfg({ ...cfg, detectMode: e.target.value }) },
+          React.createElement('option', { value: 'turn' }, '回合结束（默认）'),
+          React.createElement('option', { value: 'live' }, '实时预览（仅 Windows）'))),
       React.createElement('h3', null, '外部编辑器路径（留空自动探测）'),
       React.createElement('p', { className: 'dshdr-cfg-desc' }, '通过标准 settings 注册（命名空间 dsh-diff-review），保存后由 settings 服务写入 settings.yaml。配置优先；留空自动探测。'),
       field('code', 'VS Code（code 或 Code.exe 路径）', '如 C:\\Program Files\\Microsoft VS Code\\Code.exe'),

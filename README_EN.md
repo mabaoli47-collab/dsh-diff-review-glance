@@ -8,6 +8,7 @@ Per-turn **file-change diff review** for DeepSeek Harness (dsh) Web. After each 
 
 - **Multi-workspace, multi-baseline**: each workspace gets its own baseline and change tracking; switching workspaces never cross-contaminates state (same file names or turn numbers do not collide).
 - **Detects every modification source**: end-of-turn full version diff catches changes made by bash, editors, or write tools alike.
+- **Optional realtime preview (v0.5)**: the detection mode can be switched between "end of turn" and "realtime preview" — realtime mode watches the workspace with `fs.watch` (Windows only) and shows a read-only "in-progress changes" preview while the conversation is running; it is folded into the formal review items when the turn ends (avoiding intermediate write states).
 - **Always-visible review dock**: the "pending changes" bar sits above the composer even with zero changes (empty state), and shows progress while scanning.
 - **Two-level grouping (workspace → session)**: the dock expands into per-session groups with the source turn tagged ("turn N"); multiple sessions in one workspace never cross-contaminate — a turn number is only unique within its session.
 - **Real session titles**: session groups show the dsh conversation title (read from the `session/title` log event); before a title exists they fall back to a short session id (e.g. `#356424b9`).
@@ -41,8 +42,9 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 2. After a turn finishes:
    - A "pending changes" dock appears above the composer (click to expand → workspace header + per-session groups; the bar offers "keep all in workspace", each session group offers "keep all in session").
    - A "file changes in turn N" panel appears at the tail of that turn (click to expand).
-3. Click a file to expand its diff (toggle "changed lines only").
-4. Keep or revert each change; "Open with..." opens the file or a diff in VS Code / VS2022, or reveals it in the file explorer / Finder.
+3. Optional: switch the detection mode to "realtime preview" in Settings → Diff Review Plugin; while a conversation is running you then see a read-only "in-progress changes (realtime preview)" block at the top of the dock (Windows only).
+4. Click a file to expand its diff (toggle "changed lines only").
+5. Keep or revert each change; "Open with..." opens the file or a diff in VS Code / VS2022, or reveals it in the file explorer / Finder.
 
 ## Configuration (Settings → Diff Review Plugin)
 
@@ -54,13 +56,14 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 | `maxFiles` | Max files walked per workspace (scan stops at this limit) | `20000` |
 | `primeMaxFiles` | Max files pre-read into the baseline cache | `6000` |
 | `primeMaxChars` | Baseline character budget (in MB) | `48` |
+| `detectMode` | Detection mode: `turn`=scan at end of each turn (default, cross-platform); `live`=realtime preview (`fs.watch`, Windows only; non-Windows falls back to `turn`) | `turn` |
 
 Values are stored in `~/.dsh/settings.yaml` under the `dsh-diff-review` namespace. Numeric items fall back to the default when set to `0` or an invalid value.
 
 ## How it works
 
 - **Multi-baseline + session layer**: `STORES: Map<cwd, store>` keeps one independent state bucket per workspace (baseline / version snapshot / content cache / groups / items); `SESSIONS: Map<sessionId, {cwd, lastTurn, label}>` is the session registry; turn keys are `sessionId::turn` and item ids are `sessionId::turn::path`, so multiple sessions in one workspace never collide on equal turn numbers.
-- **Scan timing**: `agent/turn-stopping` triggers a full `walkWorkspace` version comparison at the end of each turn.
+- **Scan timing**: `agent/turn-stopping` triggers a full `walkWorkspace` version comparison at the end of each turn (default, cross-platform). With `detectMode=live` the workspace is additionally watched with recursive `fs.watch`; events are debounced (600ms) before a per-file / full incremental comparison runs — the watcher is only a trigger, correctness still comes from version comparison, and the end-of-turn full scan remains as a fallback, so a missed watcher event only delays detection, never loses it. Realtime changes land in the read-only `store.live` preview bucket and are folded into the formal items when the turn ends.
 - **In-place changes only**: new files are cached but never turned into review items; a version change is what produces a diff.
 - **Transport (v0.4+)**: the host exposes services through the official **typert RPC** (`dsh-typert-protocol`) — the calling `agent` is injected by the runtime, so session binding cannot be forged and there is no HTTP attack surface; the client mounts the descriptors via `ctx.remote` and calls the namespace methods. The `webServer` HTTP route is kept as a **transitional fallback** and will be removed once the migration is fully verified.
 
@@ -85,6 +88,7 @@ The plugin applies path-boundary, command-injection, TOCTOU/version-conflict pro
 - **Transitional HTTP route**: the `webServer` route stays until the typert migration is complete. During the transition, binding dsh's `webServer` to a non-loopback address (e.g. `0.0.0.0`) would expose that route's API — do not expose dsh to untrusted networks. **Once the migration completes, this route (and its CSRF/DNS-rebinding/Host/Origin guards) is deleted entirely and the attack surface goes to zero.**
 - **Debug tool `drvw_debug`**: registered as a model tool (only **no-write-back** debug actions: `state`/`scan`; `revertAll` removed; cwd locked to the current session workspace; scan throttled to once per 2s and updates the plugin's own baseline/cache state). Prompt injection could still lure the model into calling it and expose current-workspace information to the model — the model already has workspace file access, so this risk is equivalent to using the fs/shell tools directly.
 - **Resource usage**: scans and baseline caching are capped (`maxFiles` / `primeMaxFiles` / `primeMaxChars`, configurable), but raising the caps too far noticeably increases memory and scan time; pending review items keep original/modified/current copies in memory, so long sessions grow continuously.
+- **Realtime preview (live mode) resources & reliability**: `detectMode=live` keeps one recursive `fs.watch` handle per workspace that has been visited (Windows), so handles accumulate when switching workspaces; watcher events are only triggers — missed events never lose changes (end-of-turn fallback), but a churn-heavy workspace incurs periodic incremental comparison cost (600ms debounce). This mode is Windows-only; other platforms fall back to turn mode automatically.
 - **Git backfill**: to recover original content for files outside the baseline budget, the plugin runs a read-only `git show` through the host shell (10s timeout, paths containing glob characters are refused). This only reads; it never modifies files.
 
 ## Known limitations

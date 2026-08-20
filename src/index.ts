@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, posix } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { chmod } from 'node:fs/promises'
+import { watch } from 'node:fs'
 import { canonCwd, IGNORE_DIRS, norm, relOf, isSensitiveFile, withinRoot, realPathBlocked, shortSessionId, turnKey, splitLines, computeDiff } from './host/util.js'
 import { hostContribution } from './host/typert.js'
 
@@ -51,6 +52,12 @@ export function apply(ctx) {
       contentCache: new Map(),
       groups: new Map(),
       items: new Map(),
+      // 实时预览桶（detectMode='live'，仅 Windows）：watcher 检测到的"进行中"修改，
+      // 只读展示；回合结束正式扫描后清空并并入正式审阅项（避免抓到 AI 写文件的中间态）
+      live: new Map(),
+      watcher: null, // fs.watch 句柄（懒启动，随 fiber 卸载关闭）
+      watchTimer: null, // 事件去抖定时器
+      watchFailed: false, // watcher 启动失败标记（防反复尝试）
       sessions: new Map(), // sessionId -> { lastTurn, label }：本工作区关联的会话（反向索引）
       lastTurn: 0,
       rev: 0,
@@ -161,6 +168,7 @@ export function apply(ctx) {
 
   function ensureBaseline(s) {
     if (s.baseline) return s.baseline
+    syncLiveWatcher(s) // 实时模式：工作区基线建立时同步启动 watcher
     s.baselineLoading = true
     s.baseline = (async () => {
       try {
@@ -243,6 +251,156 @@ export function apply(ctx) {
     } catch (e) { return null }
   }
 
+  // ---- 实时预览（detectMode='live'，仅 Windows）：fs.watch 事件去抖后增量比对 ----
+  // 设计：watcher 只当"变更触发器"，正确性仍以单文件/全量版本对比为准；
+  // 回合末全量扫描保留为兜底，watcher 丢事件只会延迟、不会漏检。
+  // 实时变更挂 store.live（工作区级"进行中"预览：只读、不可审阅），
+  // 回合结束正式扫描后清空并入正式审阅项——避免抓到 AI 写文件的中间态。
+  function syncLiveWatcher(s) {
+    const cfg = readConfig()
+    if (cfg.detectMode === 'live' && !s.watcher && !s.watchFailed) {
+      try {
+        const w = watch(s.cwd, { recursive: true }, (eventType, filename) => scheduleLiveCheck(s, filename))
+        w.on('error', (e) => {
+          s.watchFailed = true
+          try { w.close() } catch (err) { /* 忽略 */ }
+          s.watcher = null
+          console.warn('[dsh-diff-review] 实时监听失败，已回退回合模式:', (e && e.message) || String(e))
+        })
+        s.watcher = w
+      } catch (e) {
+        s.watchFailed = true
+        console.warn('[dsh-diff-review] 实时监听启动失败，已回退回合模式:', (e && e.message) || String(e))
+      }
+    } else if (cfg.detectMode !== 'live' && s.watcher) {
+      try { s.watcher.close() } catch (e) { /* 忽略 */ }
+      s.watcher = null
+    }
+  }
+  function scheduleLiveCheck(s, filename) {
+    if (readConfig().detectMode !== 'live') return
+    // 保留最近一次事件的文件名：同批次改动以最后落盘的为准（多个事件取最后一个）
+    if (filename != null) s._livePending = filename
+    if (s.watchTimer) clearTimeout(s.watchTimer)
+    s.watchTimer = setTimeout(() => { s.watchTimer = null; runLiveCheck(s) }, 600)
+  }
+  async function runLiveCheck(s) {
+    if (!s.cwd || readConfig().detectMode !== 'live') return
+    if (s.baseline) { try { await s.baseline } catch (e) {} }
+    const pending = s._livePending
+    s._livePending = null
+    try {
+      const changed = pending ? await checkLiveFile(s, pending) : await checkLiveAll(s)
+      if (changed) s.rev++
+    } catch (e) {
+      console.error('[dsh-diff-review] 实时检查失败', e)
+    }
+  }
+  // 文件级事件：只比对单个文件（绝大多数场景，避免全量 walk 成本）
+  async function checkLiveFile(s, rawPath) {
+    const joined = join(s.cwd, norm(rawPath))
+    let target
+    try { target = await fs.resolve(joined) } catch (e) { return removeLivePath(s, rawPath) }
+    if (!withinRoot(s.cwd, target.targetKey)) return false
+    const realName = target.displayPath.split('/').pop() || ''
+    if (isSensitiveFile(realName) || realPathBlocked(target.targetKey)) return false
+    let info
+    try { info = await fs.stat(target) } catch (e) { return removeLivePath(s, rawPath) }
+    const path = target.displayPath
+    return liveCompare(s, path, target, info ? info.version : undefined, info ? info.size : undefined)
+  }
+  // 目录级/无文件名事件：全量兜底对比 + 清理已消失的 live 项 + 新文件读缓存
+  async function checkLiveAll(s) {
+    let walk
+    try { walk = await walkWorkspace(s.cwd) } catch (e) { return false }
+    const meta = walk.meta
+    let changed = false
+    for (const [path, info] of meta) {
+      const prev = s.fileMeta.get(path)
+      if (prev && prev.version !== info.version) {
+        if (await liveCompare(s, path, info.target, info.version, info.size)) changed = true
+      }
+    }
+    for (const path of Array.from(s.live.keys())) {
+      if (!meta.has(path)) { s.live.delete(path); changed = true }
+    }
+    for (const [path, info] of meta) {
+      if (!s.fileMeta.has(path) && (info.size === undefined || info.size <= CACHE_NEW_BYTES)) {
+        try { s.contentCache.set(path, await fs.readText(info.target)) } catch (e) { /* 二进制或不可读 */ }
+      }
+    }
+    return changed
+  }
+  // 单文件版本对比 → 更新 live 桶（与 scan 的 item 生成逻辑同构，但不改 fileMeta）
+  async function liveCompare(s, path, target, ver, size) {
+    const prev = s.fileMeta.get(path)
+    if (prev && prev.version === String(ver)) return false
+    if (!prev) {
+      if (size === undefined || size <= CACHE_NEW_BYTES) {
+        try { s.contentCache.set(path, await fs.readText(target)) } catch (e) { /* 二进制或不可读 */ }
+      }
+      return false
+    }
+    if (size !== undefined && size > MAX_READ_BYTES) return false
+    let current
+    try { current = await fs.readText(target) } catch (e) { return false }
+    let original = s.contentCache.get(path)
+    let gitOriginal = false
+    if (original === undefined) {
+      original = await readOriginalFromGit(s, path)
+      if (typeof original === 'string') { s.contentCache.set(path, original); gitOriginal = true }
+    }
+    if (original !== undefined && original === current) {
+      s.live.delete(path)
+      return false
+    }
+    const diff = original === null ? buildAddsOnlyDiff(current) : computeDiff(original, current)
+    s.live.set(path, {
+      id: 'live::' + path,
+      sessionId: '(live)',
+      turn: 0,
+      file: path,
+      relPath: relOf(path, s),
+      original,
+      modified: current,
+      current,
+      originalMissing: original === null,
+      gitOriginal,
+      status: 'pending',
+      stats: diff.stats,
+      hunks: diff.hunks,
+      degraded: !!diff.degraded,
+      live: true,
+    })
+    return true
+  }
+  // 删除事件兜底：resolve 已失败，按路径归一化匹配清理 live 项
+  function removeLivePath(s, rawPath) {
+    const key = norm(rawPath).toLowerCase()
+    let removed = false
+    for (const k of Array.from(s.live.keys())) {
+      const nk = norm(k).toLowerCase()
+      if (nk === key || nk.endsWith('/' + key)) { s.live.delete(k); removed = true }
+    }
+    return removed
+  }
+  // 原始内容未知（外部命令修改/非 git 补读失败）时：整文件视为新增
+  function buildAddsOnlyDiff(current) {
+    const lines = splitLines(current)
+    return {
+      stats: { adds: lines.length, dels: 0 },
+      hunks: [{ rows: lines.map((t, j) => ({ k: 'p', o: null, n: { n: j + 1, t, hl: null } })), gap: 0 }],
+      degraded: false,
+    }
+  }
+  // watcher/去抖定时器随插件 fiber 卸载清理
+  ctx.effect(() => () => {
+    for (const st of STORES.values()) {
+      if (st.watchTimer) { clearTimeout(st.watchTimer); st.watchTimer = null }
+      if (st.watcher) { try { st.watcher.close() } catch (e) { /* 忽略 */ } st.watcher = null }
+    }
+  })
+
   async function scan(s, sessionId, turn) {
     if (!s.cwd) return
     s.scanning = true
@@ -294,11 +452,7 @@ export function apply(ctx) {
           if (s.items.has(id)) continue
           let diff
           if (c.original === null) {
-            const lines = splitLines(c.current)
-            diff = {
-              stats: { adds: lines.length, dels: 0 },
-              hunks: [{ rows: lines.map((t, j) => ({ k: 'p', o: null, n: { n: j + 1, t, hl: null } })), gap: 0 }],
-            }
+            diff = buildAddsOnlyDiff(c.current)
           } else {
             diff = computeDiff(c.original, c.current)
           }
@@ -404,11 +558,11 @@ export function apply(ctx) {
   }
 
   function itemSummary(item) {
-    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, gitOriginal: !!item.gitOriginal, stats: item.stats }
+    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, gitOriginal: !!item.gitOriginal, stats: item.stats, live: !!item.live }
   }
   function itemFull(item) {
     // originalMissing 时带 current，供 DiffView 显示当前文件内容；正常 diff 不传整个文件体
-    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, gitOriginal: !!item.gitOriginal, stats: item.stats, hunks: item.hunks, current: item.originalMissing ? item.current : undefined, degraded: !!item.degraded }
+    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, gitOriginal: !!item.gitOriginal, stats: item.stats, hunks: item.hunks, current: item.originalMissing ? item.current : undefined, degraded: !!item.degraded, live: !!item.live }
   }
 
   // ---- 标准 settings 注册（schemastery 兼容的鸭子类型 schema） ----
@@ -422,6 +576,7 @@ export function apply(ctx) {
       maxFiles: { type: 'number' },
       primeMaxFiles: { type: 'number' },
       primeMaxChars: { type: 'number' },
+      detectMode: { type: 'string' },
     }
     function schema(input) {
       const src = input && typeof input === 'object' ? input : {}
@@ -447,6 +602,7 @@ export function apply(ctx) {
         maxFiles: { type: 'number', description: '工作区遍历文件数上限（达到即截断，默认 20000）' },
         primeMaxFiles: { type: 'number', description: '基线预读文件数上限（默认 6000）' },
         primeMaxChars: { type: 'number', description: '基线预读字符预算，单位 MB（默认 48）' },
+        detectMode: { type: 'string', description: '检测模式：turn=回合结束刷新（默认，跨平台）；live=实时预览（watcher 监听，仅 Windows）' },
       },
     })
     try {
@@ -459,7 +615,7 @@ export function apply(ctx) {
 
   // 读取插件配置（settings.yaml 命名空间 dsh-diff-review）；数字项 0/非法回退默认常量
   function readConfig() {
-    const empty = { code: '', devenv: '', vsDiffMerge: '', maxFiles: MAX_FILES, primeMaxFiles: PRIME_MAX_FILES, primeMaxChars: PRIME_MAX_CHARS }
+    const empty = { code: '', devenv: '', vsDiffMerge: '', maxFiles: MAX_FILES, primeMaxFiles: PRIME_MAX_FILES, primeMaxChars: PRIME_MAX_CHARS, detectMode: 'turn' }
     if (!settingsRegistered) return empty
     try {
       const v = settings.get(CONFIG_NS)
@@ -470,6 +626,8 @@ export function apply(ctx) {
         if (!(Number.isFinite(n) && n > 0)) return def
         return Math.min(Math.floor(n), max)
       }
+      // 实时预览（watcher）仅 Windows 实现：其他平台一律回退回合模式
+      const isWin = String(process.platform) === 'win32'
       return {
         code: typeof v.code === 'string' ? v.code : '',
         devenv: typeof v.devenv === 'string' ? v.devenv : '',
@@ -478,6 +636,7 @@ export function apply(ctx) {
         primeMaxFiles: num(v.primeMaxFiles, PRIME_MAX_FILES, 60000),
         // 配置以 MB 为单位，内部转为字符数；硬上限 1024MB
         primeMaxChars: num(v.primeMaxChars, PRIME_MAX_CHARS / (1024 * 1024), 1024) * (1024 * 1024),
+        detectMode: v.detectMode === 'live' && isWin ? 'live' : 'turn',
       }
     } catch (e) { return empty }
   }
@@ -611,7 +770,8 @@ export function apply(ctx) {
         const s = pickStore(args)
         if (!s) return null
         const id = args && args.itemId
-        const item = id ? s.items.get(id) : undefined
+        // 实时预览项（id 前缀 live::）从 live 桶读取，正式项从 items 读取
+        const item = id ? (id.indexOf('live::') === 0 ? s.live.get(id.slice(6)) : s.items.get(id)) : undefined
         if (!item) return null
         // 会话隔离：必须携带会话标识且 item 属于该会话——缺省即拒绝（fail-closed）。
         // typert 通道恒注入 agent 会话（不可省略）；HTTP 过渡通道缺省时不得退化为
@@ -626,7 +786,8 @@ export function apply(ctx) {
         // 会话隔离：必须携带会话标识且禁止操作其他会话的审阅项（fail-closed）
         const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
         if (!sid) return { ok: false, error: 'no-store', message: '缺少会话标识，操作已拒绝' }
-        const item = args && args.itemId ? s.items.get(args.itemId) : undefined
+        const item = args && args.itemId ? (args.itemId.indexOf('live::') === 0 ? s.live.get(args.itemId.slice(6)) : s.items.get(args.itemId)) : undefined
+        if (item && item.live) return { ok: false, error: 'live-item', message: '进行中的修改预览不可审阅，回合结束后再操作' }
         if (item && item.sessionId !== sid) return { ok: false, error: 'no-store', message: '会话不匹配，操作已拒绝' }
         return reviewItem(s, args && args.itemId, args && args.action)
       }
@@ -691,8 +852,16 @@ export function apply(ctx) {
       const n = Number(args[key])
       patch[key] = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
     }
+    // 检测模式：仅允许 turn / live（非法拒绝；live 在非 Windows 由 readConfig 回退回合模式）
+    const dm = typeof args.detectMode === 'string' ? args.detectMode : ''
+    if (dm !== 'turn' && dm !== 'live') return { ok: false, message: 'detectMode 仅支持 turn / live' }
+    patch.detectMode = dm
     return Promise.resolve(settings.update(CONFIG_NS, patch))
-      .then(() => ({ ok: true, config: { code: patch.code, devenv: patch.devenv, vsDiffMerge: patch.vsDiffMerge } }))
+      .then(() => {
+        // 模式切换后同步各工作区 watcher 状态（live→启动，turn→关闭）；失败标记重置以便重试
+        for (const st of STORES.values()) { st.watchFailed = false; syncLiveWatcher(st) }
+        return { ok: true, config: { code: patch.code, devenv: patch.devenv, vsDiffMerge: patch.vsDiffMerge, detectMode: patch.detectMode } }
+      })
       .catch((e) => ({ ok: false, message: (e && e.message) || String(e) }))
   }
 
@@ -702,8 +871,10 @@ export function apply(ctx) {
     const diff = !!(args && args.diff)
     const s = pickStore(args)
     if (!s) return { ok: false, message: '尚无活跃工作区，无法打开' }
-    const item = itemId ? s.items.get(itemId) : undefined
+    const item = itemId ? (itemId.indexOf('live::') === 0 ? s.live.get(itemId.slice(6)) : s.items.get(itemId)) : undefined
     if (!item) return { ok: false, message: '记录不存在（插件可能已重启）' }
+    // 实时预览项：只读展示，不支持外部打开（原始内容可能仍为中间态）
+    if (item.live) return { ok: false, message: '进行中的修改预览暂不支持外部打开' }
     // 会话隔离（与 getItem/review 一致）：必须携带会话标识且禁止跨会话触发写临时原文 + 启动进程
     const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
     if (!sid) return { ok: false, message: '缺少会话标识，操作已拒绝' }
@@ -754,7 +925,7 @@ export function apply(ctx) {
     const curSessionId = args && typeof args.sessionId === 'string' ? args.sessionId : ''
     const s = pickStore(args)
     if (!s) {
-      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], limits }
+      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], limits }
     }
     const groups = []
     for (const g of s.groups.values()) {
@@ -815,6 +986,7 @@ export function apply(ctx) {
       sessions,
       groups,
       pending,
+      live: Array.from(s.live.values()).map(itemSummary),
       limits,
     }
   }
@@ -1122,7 +1294,11 @@ export function apply(ctx) {
     if (s && agent.session && agent.session.id != null) {
       const sid = String(agent.session.id)
       ensureBaseline(s)
-      s.scanChain = s.scanChain.then(() => scan(s, sid, turn)).catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e) })
+      s.scanChain = s.scanChain.then(async () => {
+        await scan(s, sid, turn)
+        // 回合结束定稿：清空实时预览桶（正式审阅项已收录该轮变更），避免旧快照并存
+        if (s.live.size > 0) { s.live.clear(); s.rev++ }
+      }).catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e) })
     }
   }))
 
@@ -1148,5 +1324,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.4.6），typert 路由 + webServer 过渡路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.5.0），typert 路由 + webServer 过渡路由:', ROUTE)
 }
