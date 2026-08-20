@@ -57,7 +57,8 @@ export function apply(ctx) {
       live: new Map(),
       watcher: null, // fs.watch 句柄（懒启动，随 fiber 卸载关闭）
       watchTimer: null, // 事件去抖定时器
-      watchFailed: false, // watcher 启动失败标记（防反复尝试）
+      watchFailedAt: 0, // watcher 启动失败时间戳（30 秒后自动重试；0=无失败）
+      watchError: '', // 最近一次 watcher 启动失败原因（getState 暴露给 UI）
       sessions: new Map(), // sessionId -> { lastTurn, label }：本工作区关联的会话（反向索引）
       lastTurn: 0,
       rev: 0,
@@ -258,19 +259,25 @@ export function apply(ctx) {
   // 回合结束正式扫描后清空并入正式审阅项——避免抓到 AI 写文件的中间态。
   function syncLiveWatcher(s) {
     const cfg = readConfig()
-    if (cfg.detectMode === 'live' && !s.watcher && !s.watchFailed) {
+    // 失败自动重试：30 秒后允许再次尝试（watchFailedAt 由 getState/saveEditorConfig 触发路径重置）
+    if (s.watchFailedAt && Date.now() - s.watchFailedAt > 30000) { s.watchFailedAt = 0; s.watchError = '' }
+    if (cfg.detectMode === 'live' && !s.watcher && !s.watchFailedAt) {
       try {
         const w = watch(s.cwd, { recursive: true }, (eventType, filename) => scheduleLiveCheck(s, filename))
         w.on('error', (e) => {
-          s.watchFailed = true
+          s.watchFailedAt = Date.now()
+          s.watchError = (e && e.message) || String(e)
           try { w.close() } catch (err) { /* 忽略 */ }
           s.watcher = null
-          console.warn('[dsh-diff-review] 实时监听失败，已回退回合模式:', (e && e.message) || String(e))
+          console.warn('[dsh-diff-review] 实时监听失败，已回退回合模式:', s.watchError)
         })
         s.watcher = w
+        s.watchFailedAt = 0
+        s.watchError = ''
       } catch (e) {
-        s.watchFailed = true
-        console.warn('[dsh-diff-review] 实时监听启动失败，已回退回合模式:', (e && e.message) || String(e))
+        s.watchFailedAt = Date.now()
+        s.watchError = (e && e.message) || String(e)
+        console.warn('[dsh-diff-review] 实时监听启动失败，已回退回合模式:', s.watchError)
       }
     } else if (cfg.detectMode !== 'live' && s.watcher) {
       try { s.watcher.close() } catch (e) { /* 忽略 */ }
@@ -859,7 +866,7 @@ export function apply(ctx) {
     return Promise.resolve(settings.update(CONFIG_NS, patch))
       .then(() => {
         // 模式切换后同步各工作区 watcher 状态（live→启动，turn→关闭）；失败标记重置以便重试
-        for (const st of STORES.values()) { st.watchFailed = false; syncLiveWatcher(st) }
+        for (const st of STORES.values()) { st.watchFailedAt = 0; st.watchError = ''; syncLiveWatcher(st) }
         return { ok: true, config: { code: patch.code, devenv: patch.devenv, vsDiffMerge: patch.vsDiffMerge, detectMode: patch.detectMode } }
       })
       .catch((e) => ({ ok: false, message: (e && e.message) || String(e) }))
@@ -924,8 +931,14 @@ export function apply(ctx) {
     const limits = { maxFiles: cfg.maxFiles, primeMaxFiles: cfg.primeMaxFiles, primeMaxChars: cfg.primeMaxChars }
     const curSessionId = args && typeof args.sessionId === 'string' ? args.sessionId : ''
     const s = pickStore(args)
+    // 实时模式：只要会话已登记（store 存在），每次 getState 都确保 watcher 状态与基线
+    // 就绪（幂等）——不依赖 agent/status 回合事件，重启后首个 getState 即可启动实时监听
+    if (s && cfg.detectMode === 'live') {
+      syncLiveWatcher(s)
+      ensureBaseline(s)
+    }
     if (!s) {
-      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], limits }
+      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], limits, detectMode: cfg.detectMode, watcherActive: false, liveError: '' }
     }
     const groups = []
     for (const g of s.groups.values()) {
@@ -987,6 +1000,9 @@ export function apply(ctx) {
       groups,
       pending,
       live: Array.from(s.live.values()).map(itemSummary),
+      detectMode: cfg.detectMode,
+      watcherActive: !!s.watcher,
+      liveError: s.watchError || '',
       limits,
     }
   }
@@ -1310,7 +1326,13 @@ export function apply(ctx) {
   if (typert && typeof typert.register === 'function') {
     class DiffReviewService extends TypertRemoteService {
       constructor() { super(ctx, 'diffReview') }
-      getState(agent, request) { return handleAction('getState', Object.assign({}, request, { sessionId: String(agent) })) }
+      getState(agent, request) {
+        // 重启后首个 getState 即登记会话（typert 的 agent 由运行时注入，含 session/header/cwd）：
+        // live 模式据此建立基线并启动 watcher，不依赖 agent/status 回合事件——
+        // 否则重启后第一回合进行中实时预览不生效（store 直到回合结束才创建）
+        registerSession(agent, null)
+        return handleAction('getState', Object.assign({}, request, { sessionId: String(agent) }))
+      }
       getItem(agent, request) { return handleAction('getItem', Object.assign({}, request, { sessionId: String(agent) })) }
       review(agent, request) { return handleAction('review', Object.assign({}, request, { sessionId: String(agent) })) }
       reviewGroup(agent, request) { return handleAction('reviewGroup', Object.assign({}, request, { sessionId: String(agent) })) }
@@ -1324,5 +1346,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.5.0），typert 路由 + webServer 过渡路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.5.1），typert 路由 + webServer 过渡路由:', ROUTE)
 }

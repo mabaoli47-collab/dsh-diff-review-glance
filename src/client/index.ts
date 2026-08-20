@@ -80,7 +80,7 @@ function apply(ctx) {
 
   // 初始 state 补全全部字段：首帧渲染（fetch 尚未返回）时不出现「未知工作区」误导文案，
   // 而是按"未识别"处理，等首次轮询返回后纠正
-  let state = { rev: 0, maxTurn: 0, workspaceId: null, workspaceLabel: '', sessionId: '', sessionKnown: false, loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [] }
+  let state = { rev: 0, maxTurn: 0, workspaceId: null, workspaceLabel: '', sessionId: '', sessionKnown: false, loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], detectMode: 'turn', watcherActive: false, liveError: '' }
   const subs = new Set()
   const detailCache = new Map()
   let fetching = false
@@ -132,7 +132,7 @@ function apply(ctx) {
             state = Object.assign({}, state, { hostError: 'old-host', sessionKnown: false, loading: false })
             emit()
           }
-        } else if (st.hostError !== state.hostError || !!st.sessionKnown !== !!state.sessionKnown || st.pendingCount !== state.pendingCount || (st.sessions || []).length !== (state.sessions || []).length || st.rev !== state.rev || !!st.loading !== !!state.loading || st.maxTurn !== state.maxTurn || st.workspaceId !== state.workspaceId) {
+        } else if (st.hostError !== state.hostError || !!st.sessionKnown !== !!state.sessionKnown || st.pendingCount !== state.pendingCount || (st.sessions || []).length !== (state.sessions || []).length || st.rev !== state.rev || !!st.loading !== !!state.loading || st.maxTurn !== state.maxTurn || st.workspaceId !== state.workspaceId || st.detectMode !== state.detectMode || !!st.watcherActive !== !!state.watcherActive || (st.liveError || '') !== (state.liveError || '')) {
           state = st
           emit()
         }
@@ -261,7 +261,8 @@ function apply(ctx) {
     '.dshdr-cfg-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }\n' +
     '.dshdr-cfg-field input { padding: 6px 8px; border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; background: rgba(128,128,128,0.08); color: inherit; font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }\n' +
     '.dshdr-cfg-field input:focus { outline: none; border-color: rgba(46,160,67,0.6); }\n' +
-    '.dshdr-cfg-field select { padding: 6px 8px; border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; background: rgba(128,128,128,0.08); color: inherit; font-size: 13px; }\n' +
+    '.dshdr-cfg-field select { padding: 6px 8px; min-height: 32px; width: 100%; box-sizing: border-box; border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; background: rgba(128,128,128,0.08); color: inherit; font-size: 13px; }\n' +
+    '.dshdr-cfg-field select option { background: #1f2328; color: inherit; }\n' +
     '.dshdr-cfg-actions { display: flex; align-items: center; gap: 10px; }\n' +
     '.dshdr-cfg .dshdr-info, .dshdr-cfg .dshdr-error { padding: 0; }\n' +
     '.dshdr-missing pre { margin: 0; padding: 8px 10px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; font-family: inherit; font-size: 12px; }\n' +
@@ -513,6 +514,15 @@ function apply(ctx) {
     }
     // 实时预览块（detectMode='live' 时 host 返回）：进行中的修改，只读展示
     const liveItems = (snap && snap.live) || []
+    // 实时模式状态提示（诊断 + 可观测）：watcher 失败原因 / 已开启
+    const liveMode = !!(snap && snap.detectMode === 'live')
+    const liveStatus = liveMode
+      ? (snap && snap.liveError
+          ? React.createElement('div', { className: 'dshdr-error' }, '实时预览不可用：' + snap.liveError)
+          : snap && snap.watcherActive
+            ? React.createElement('div', { className: 'dshdr-note', style: { padding: '2px 10px 0' } }, '实时预览已开启（文件变化即时检测）')
+            : React.createElement('div', { className: 'dshdr-note', style: { padding: '2px 10px 0' } }, '实时预览：等待工作区就绪…'))
+      : null
     const liveBlock = liveItems.length > 0
       ? React.createElement('div', { className: 'dshdr-session' },
           React.createElement('div', { className: 'dshdr-session-head' },
@@ -537,6 +547,7 @@ function apply(ctx) {
       head,
       React.createElement('div', { className: 'dshdr-turn' },
         wsHead,
+        liveStatus,
         truncated ? React.createElement('div', { className: 'dshdr-loading' }, '工作区文件数超上限（当前上限 ' + ((snap && snap.limits && snap.limits.maxFiles) || 20000) + ' 个文件），扫描已截断（部分文件未覆盖）。可在 设置 → Diff 审阅插件 调整上限') : null,
         liveBlock,
         sessionBlocks.length === 0
