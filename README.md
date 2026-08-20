@@ -60,6 +60,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 | `liveRevert` | 实时预览项允许直接撤销（默认关闭；开启后 live 项显示撤销按钮，带版本冲突保护——进行中文件可能仍被 AI 改写，存在两个写者竞态，建议在 AI 停笔时撤销） | `false` |
 | `respectGitignore` | 尊重 `.gitignore`（默认开启：根 + 各层 `.gitignore` 及用户自配忽略文件中被忽略的文件不读入基线、不产生审阅项、不可撤销；关闭后恢复仅名单过滤） | `true` |
 | `extraIgnoreFiles` | 自定义忽略文件路径（每行一个，可工作区外；.gitignore 格式，作为基础忽略层，纯只读匹配） | 空 |
+| `trackNewFiles` | 跟踪新建文件（默认关闭；开启后新建文件也产生审阅项——无会话前原文，**仅可保留不可撤销**） | `false` |
 
 配置写入 `~/.dsh/settings.yaml`（命名空间 `dsh-diff-review`）。数字项填 `0` 或非法值回退默认。
 
@@ -137,6 +138,7 @@ npm test        # vitest 单元测试（纯函数：路径/边界/敏感名单/d
 | v0.15.0 | **评审修复**：单条 gitignore 模式长度上限 1024（防正则爆栈 DoS）+ 匹配 test 包 try/catch；`realPathBlocked` 只检查工作区根以下相对段（工作区在 build/ 下不再整体失效）+ Windows 盘符路径大小写折叠（.SSH/.NODE_MODULES 命中）；gitignore 规则缓存加版本校验（消除 30 秒 fail-open）+ symlink 越界不读；`pickStore` 移除最近活跃桶回退（fail-closed）；live 事件集合硬上限 1000 |
 | v0.15.1 | **匹配结果缓存（R1 性能项）**：同一文件跨 walk/live/审查的重复 gitignore 正则匹配改为文件级结果缓存（TTL 30s，规则集变化即清空）——消除 live 兜底全量/回合末全量的重复匹配成本；规则上限保持 2000（不降，避免功能损失） |
 | v0.15.2 | **评审修复（P2）**：`giCachedUpTo` 缓存查询前置（命中零 FS 开销）；`cachedGitignoreRules` 接受外部 version（walk 省 stat）；dry-run scan 输出 `changedCount` 且跳过 diff 计算；单模式通配符上限 64（闭合指数回溯 ReDoS）；失效矩阵补全（extraLayers/saveEditorConfig 清缓存、版本相同不清匹配缓存）、getItem null 出口、空闲释放清缓存 |
+| v0.16.0 | **功能性迭代**：跳过文件可观测性（`skippedCount`，dock 提示"N 个文件因过大/不可读未纳入"）；新文件跟踪（设置 `trackNewFiles`，默认关，仅展示不可撤销）；冲突拒绝引导语；gitOriginal 降级提示；非 Windows 禁用 live 选项（前置提示）；「清理已处理」按钮（清除 kept/reverted 记录，手动清理出口） |
 
 ## 许可
 

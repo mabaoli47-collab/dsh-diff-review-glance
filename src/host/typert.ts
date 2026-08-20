@@ -43,6 +43,7 @@ export const DIFF_REVIEW_INVOCATIONS = [
   descriptor('reviewGroup'),
   descriptor('reviewSession'),
   descriptor('reviewAll'),
+  descriptor('clearReviewed'),
   descriptor('openExternal'),
   descriptor('getEditorConfig'),
   descriptor('saveEditorConfig'),

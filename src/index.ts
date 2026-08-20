@@ -591,6 +591,30 @@ export function apply(ctx) {
     const prev = s.fileMeta.get(path)
     if (prev && prev.version === String(ver)) return false
     if (!prev) {
+      if (readConfig().trackNewFiles) {
+        // 新文件跟踪（设置开启）：产生 originalMissing live 项——仅展示、不可撤销
+        let current
+        try { current = await fs.readText(target) } catch (e) { return false }
+        const diff = buildAddsOnlyDiff(current)
+        s.live.set(path, {
+          id: 'live::' + path,
+          sessionId: '(live)',
+          turn: 0,
+          file: path,
+          relPath: relOf(path, s),
+          original: null,
+          modified: current,
+          current,
+          originalMissing: true,
+          gitOriginal: false,
+          status: 'pending',
+          stats: diff.stats,
+          hunks: diff.hunks,
+          degraded: false,
+          live: true,
+        })
+        return true
+      }
       if (size === undefined || size <= CACHE_NEW_BYTES) {
         try { s.contentCache.set(path, await fs.readText(target)) } catch (e) { /* 二进制或不可读 */ }
       }
@@ -713,6 +737,8 @@ export function apply(ctx) {
     // 会因 original===current 被静默跳过（会话前原文丢失），并残留不可见的幽灵项。
     // 参见 README：drvw_debug 的 scan 为纯预览，绝不修改插件内部审阅状态。
     const dryRun = !!(opts && opts.dryRun)
+    const trackNew = readConfig().trackNewFiles // 新文件跟踪（可选开关，默认关）
+    let skipped = 0 // 本回合因过大/不可读而未纳入的文件数（getState 暴露给 UI）
     s.scanning = true
     try {
       if (s.baseline) { try { await s.baseline } catch (e) {} }
@@ -729,14 +755,20 @@ export function apply(ctx) {
           const prev = s.fileMeta.get(path)
           if (prev && prev.version === info.version) continue
           if (!prev) {
-            if (!dryRun && (info.size === undefined || info.size <= CACHE_NEW_BYTES)) {
+            if (trackNew) {
+              // 新文件跟踪（设置开启）：产生 originalMissing 项——仅展示、不可撤销
+              // （无会话前原文；与 gitOriginal 同理，避开"撤销吞掉内容"）
+              let current
+              try { current = await fs.readText(info.target) } catch (e) { skipped++; continue }
+              changed.push({ path, info, original: null, current, gitOriginal: false })
+            } else if (!dryRun && (info.size === undefined || info.size <= CACHE_NEW_BYTES)) {
               try { s.contentCache.set(path, await fs.readText(info.target)) } catch (e) { /* 二进制或不可读 */ }
             }
             continue
           }
-          if (info.size !== undefined && info.size > MAX_READ_BYTES) continue
+          if (info.size !== undefined && info.size > MAX_READ_BYTES) { skipped++; continue }
           let current
-          try { current = await fs.readText(info.target) } catch (e) { continue }
+          try { current = await fs.readText(info.target) } catch (e) { skipped++; continue }
           let original = s.contentCache.get(path)
           let gitOriginal = false
           if (original === undefined) {
@@ -794,6 +826,7 @@ export function apply(ctx) {
           }
           if (changed.length > 0) s.rev++
         }
+        s.skippedCount = skipped // 跳过文件计数（getState 透传 → dock 提示"有文件未纳入"）
         return changed.length // 变更计数（drvw_debug dry-run 的预览出口；正式扫描也返回，调用方忽略）
       } catch (e) {
         s.lastError = 'scan: ' + ((e && e.message) || String(e))
@@ -814,7 +847,7 @@ export function apply(ctx) {
       }
       const cur = await fs.readText(target)
       if (cur !== expectedContent) {
-        return { ok: false, error: 'conflict', message: '文件内容已被后续修改，操作已取消' }
+        return { ok: false, error: 'conflict', message: '文件内容已被后续修改，操作已取消。请先处理更晚轮次（或实时撤销后新写入）对该文件的修改，再重试' }
       }
       const info = await fs.stat(target)
       let policy
@@ -905,6 +938,7 @@ export function apply(ctx) {
       liveRevert: { type: 'boolean' },
       respectGitignore: { type: 'boolean' },
       extraIgnoreFiles: { type: 'string' },
+      trackNewFiles: { type: 'boolean' },
     }
     function schema(input) {
       const src = input && typeof input === 'object' ? input : {}
@@ -936,6 +970,7 @@ export function apply(ctx) {
         liveRevert: { type: 'boolean', description: '实时预览项允许直接撤销（默认关闭；开启后 live 项显示撤销按钮，带版本冲突保护）' },
         respectGitignore: { type: 'boolean', description: '尊重 .gitignore（默认开启：根 + 各层 .gitignore 与用户自配忽略文件中被忽略的文件不读入基线、不产生审阅项、不可撤销）' },
         extraIgnoreFiles: { type: 'string', description: '自定义忽略文件路径（每行一个，可工作区外；作为基础忽略层，纯只读匹配）' },
+        trackNewFiles: { type: 'boolean', description: '跟踪新建文件（默认关闭；开启后新建文件也产生审阅项——仅展示、不可撤销）' },
       },
     })
     try {
@@ -948,7 +983,7 @@ export function apply(ctx) {
 
   // 读取插件配置（settings.yaml 命名空间 dsh-diff-review）；数字项 0/非法回退默认常量
   function readConfig() {
-    const empty = { code: '', devenv: '', vsDiffMerge: '', maxFiles: MAX_FILES, primeMaxFiles: PRIME_MAX_FILES, primeMaxChars: PRIME_MAX_CHARS, detectMode: 'turn', liveRevert: false, respectGitignore: true, extraIgnoreFiles: [] }
+    const empty = { code: '', devenv: '', vsDiffMerge: '', maxFiles: MAX_FILES, primeMaxFiles: PRIME_MAX_FILES, primeMaxChars: PRIME_MAX_CHARS, detectMode: 'turn', liveRevert: false, respectGitignore: true, extraIgnoreFiles: [], trackNewFiles: false }
     if (!settingsRegistered) return empty
     try {
       const v = settings.get(CONFIG_NS)
@@ -976,6 +1011,8 @@ export function apply(ctx) {
         respectGitignore: v.respectGitignore !== false,
         // 用户自配外部忽略文件（换行分隔路径；可工作区外，纯只读匹配）
         extraIgnoreFiles: typeof v.extraIgnoreFiles === 'string' ? v.extraIgnoreFiles.split(/\r?\n/).map(s => s.trim()).filter(Boolean) : [],
+        // 新建文件跟踪（默认关闭；开启后新文件产生审阅项——仅展示、不可撤销）
+        trackNewFiles: v.trackNewFiles === true,
       }
     } catch (e) { return empty }
   }
@@ -1103,7 +1140,7 @@ export function apply(ctx) {
   // 动作 + args 的契约由 client 侧 TYPERT_REMOTE 描述符与 src/host/typert.ts 保持一致。
   async function handleAction(action, args) {
     switch (action) {
-      case 'getEditorConfig': return readConfig()
+      case 'getEditorConfig': return Object.assign({}, readConfig(), { liveSupported: IS_WIN })
       case 'saveEditorConfig': return saveEditorConfig(args)
       case 'openExternal': return openExternal(args)
       case 'getState': return getState(args)
@@ -1205,6 +1242,23 @@ export function apply(ctx) {
         if (n > 0) s.rev++
         return { ok: true, kept: n }
       }
+      case 'clearReviewed': {
+        // 清除已处理（kept/reverted）记录：手动清理出口（防止 items/groups 无限累积）
+        const s = pickStore(args)
+        if (!s) return { ok: true, cleared: 0 }
+        let n = 0
+        for (const [id, item] of Array.from(s.items.entries())) {
+          if (item.status === 'kept' || item.status === 'reverted') { s.items.delete(id); n++ }
+        }
+        for (const [key, g] of Array.from(s.groups.entries())) {
+          for (const [p, item] of Array.from(g.items.entries())) {
+            if (item.status === 'kept' || item.status === 'reverted') g.items.delete(p)
+          }
+          if (g.items.size === 0) s.groups.delete(key)
+        }
+        if (n > 0) s.rev++
+        return { ok: true, cleared: n }
+      }
       default:
         return { ok: false, message: '未知动作: ' + String(action) }
     }
@@ -1243,6 +1297,8 @@ export function apply(ctx) {
       if (/[\u0000-\u001f]/.test(p)) return { ok: false, message: 'extraIgnoreFiles 含控制字符（每行一个路径），已拒绝' }
     }
     patch.extraIgnoreFiles = extraList.join('\n')
+    // 新建文件跟踪开关（默认关闭）
+    patch.trackNewFiles = args.trackNewFiles === true
     return Promise.resolve(settings.update(CONFIG_NS, patch))
       .then(() => {
         // 模式切换后同步各工作区 watcher 状态（live→启动，turn→关闭）；失败标记重置以便重试
@@ -1326,7 +1382,7 @@ export function apply(ctx) {
       ensureBaseline(s)
     }
     if (!s) {
-      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], limits, detectMode: cfg.detectMode, liveRevert: cfg.liveRevert, respectGitignore: cfg.respectGitignore, watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
+      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], skippedCount: 0, limits, detectMode: cfg.detectMode, liveRevert: cfg.liveRevert, respectGitignore: cfg.respectGitignore, liveSupported: IS_WIN, watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
     }
     const groups = []
     for (const g of s.groups.values()) {
@@ -1394,6 +1450,8 @@ export function apply(ctx) {
       watcherActive: !!s.watcher,
       liveError: s.watchError || '',
       liveStats: { events: s._liveEventCount || 0, checks: s._liveCheckCount || 0, items: s.live.size },
+      skippedCount: s.skippedCount || 0,
+      liveSupported: IS_WIN,
       limits,
     }
   }
@@ -1645,6 +1703,7 @@ export function apply(ctx) {
       reviewGroup(agent, request) { return handleAction('reviewGroup', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
       reviewSession(agent, request) { return handleAction('reviewSession', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
       reviewAll(agent, request) { return handleAction('reviewAll', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      clearReviewed(agent, request) { return handleAction('clearReviewed', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
       openExternal(agent, request) { return handleAction('openExternal', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
       getEditorConfig(agent, request) { return handleAction('getEditorConfig', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
       saveEditorConfig(agent, request) { return handleAction('saveEditorConfig', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
@@ -1653,5 +1712,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.15.2），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.16.0），typert 唯一通道（无 HTTP 路由）')
 }

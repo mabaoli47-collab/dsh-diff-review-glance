@@ -60,6 +60,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 | `liveRevert` | Allow reverting realtime preview items directly (off by default; when enabled live items show a revert button with version-conflict protection — in-progress files may still be rewritten by the AI, a two-writer race, so revert when the AI is not writing the file) | `false` |
 | `respectGitignore` | Respect `.gitignore` (on by default: files ignored by the root **and every nested layer** plus user-configured ignore files are never read into the baseline, never turned into review items, never revertable; turning it off falls back to the name-list filter only) | `true` |
 | `extraIgnoreFiles` | Custom ignore-file paths (one per line, may live outside the workspace; `.gitignore` format, applied as a low-priority base layer, read-only matching) | empty |
+| `trackNewFiles` | Track newly created files (off by default; when enabled new files also produce review items — no pre-session original, so **keep-only, not revertable**) | `false` |
 
 Values are stored in `~/.dsh/settings.yaml` under the `dsh-diff-review` namespace. Numeric items fall back to the default when set to `0` or an invalid value.
 
@@ -138,6 +139,7 @@ npm test        # vitest unit tests (pure functions: path/boundary/sensitive-lis
 | v0.15.0 | **Review fixes**: per-pattern length cap (1024) against regex stack-overflow DoS + try/catch around rule tests; `realPathBlocked` checks only segments below the workspace root (workspaces under `build/` no longer fail wholesale) and folds case on Windows drive paths (`.SSH`/`NODE_MODULES` match); gitignore rule cache now version-checked (no 30s fail-open window) and symlinked `.gitignore` out of the workspace is skipped; `pickStore` dropped the last-active-workspace fallback (fail-closed); live event set capped at 1000 |
 | v0.15.1 | **Match-result cache (R1 perf)**: repeated gitignore matching of the same file across walks/live/review is replaced by a per-file result cache (TTL 30s, cleared when rules change) — removes the repeated matching cost of the live fallback and end-of-turn full scans; rule cap stays at 2000 (not lowered, to avoid losing functionality) |
 | v0.15.2 | **Review fixes (P2)**: `giCachedUpTo` checks the result cache first (zero FS cost on hit); `cachedGitignoreRules` accepts an external version (walk skips stat); dry-run scan reports `changedCount` and skips diff computation; per-pattern wildcard cap of 64 (closes the exponential-backtracking ReDoS); invalidation matrix completed (extraLayers/saveEditorConfig clear caches, unchanged version no longer clears the match cache), getItem null exit, idle release clears caches |
+| v0.16.0 | **Functional iteration**: skipped-file observability (`skippedCount`, dock shows "N files not included: too large / unreadable"); new-file tracking (setting `trackNewFiles`, off by default, keep-only); conflict-refusal guidance; gitOriginal degradation hint; live option disabled up front on non-Windows; "clear reviewed" button (removes kept/reverted records as a manual cleanup outlet) |
 
 ## License
 

@@ -24,7 +24,7 @@ function descriptor(method) {
 }
 const TYPERT_REMOTE = {
   package: REMOTE_PACKAGE,
-  descriptors: ['getState', 'getItem', 'review', 'reviewGroup', 'reviewSession', 'reviewAll', 'openExternal', 'getEditorConfig', 'saveEditorConfig'].map(descriptor),
+  descriptors: ['getState', 'getItem', 'review', 'reviewGroup', 'reviewSession', 'reviewAll', 'clearReviewed', 'openExternal', 'getEditorConfig', 'saveEditorConfig'].map(descriptor),
 }
 
 let pluginCtx = null
@@ -68,7 +68,7 @@ function apply(ctx) {
 
   // 初始 state 补全全部字段：首帧渲染（fetch 尚未返回）时不出现「未知工作区」误导文案，
   // 而是按"未识别"处理，等首次轮询返回后纠正
-  let state = { rev: 0, maxTurn: 0, workspaceId: null, workspaceLabel: '', sessionId: '', sessionKnown: false, loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], detectMode: 'turn', liveRevert: false, respectGitignore: true, watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
+  let state = { rev: 0, maxTurn: 0, workspaceId: null, workspaceLabel: '', sessionId: '', sessionKnown: false, loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], skippedCount: 0, detectMode: 'turn', liveRevert: false, respectGitignore: true, liveSupported: false, watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
   const subs = new Set()
   const detailCache = new Map()
   let fetching = false
@@ -120,7 +120,7 @@ function apply(ctx) {
             state = Object.assign({}, state, { hostError: 'old-host', sessionKnown: false, loading: false })
             emit()
           }
-        } else if (st.hostError !== state.hostError || !!st.sessionKnown !== !!state.sessionKnown || st.pendingCount !== state.pendingCount || (st.sessions || []).length !== (state.sessions || []).length || st.rev !== state.rev || !!st.loading !== !!state.loading || st.maxTurn !== state.maxTurn || st.workspaceId !== state.workspaceId || st.detectMode !== state.detectMode || !!st.liveRevert !== !!state.liveRevert || !!st.respectGitignore !== !!state.respectGitignore || !!st.watcherActive !== !!state.watcherActive || (st.liveError || '') !== (state.liveError || '') || !!st.truncated !== !!state.truncated || (st.limits && st.limits.maxFiles) !== (state.limits && state.limits.maxFiles) || (st.liveStats && st.liveStats.events) !== (state.liveStats && state.liveStats.events) || (st.liveStats && st.liveStats.items) !== (state.liveStats && state.liveStats.items)) {
+        } else if (st.hostError !== state.hostError || !!st.sessionKnown !== !!state.sessionKnown || st.pendingCount !== state.pendingCount || (st.sessions || []).length !== (state.sessions || []).length || st.rev !== state.rev || !!st.loading !== !!state.loading || st.maxTurn !== state.maxTurn || st.workspaceId !== state.workspaceId || st.detectMode !== state.detectMode || !!st.liveRevert !== !!state.liveRevert || !!st.respectGitignore !== !!state.respectGitignore || !!st.watcherActive !== !!state.watcherActive || (st.liveError || '') !== (state.liveError || '') || !!st.truncated !== !!state.truncated || (st.skippedCount || 0) !== (state.skippedCount || 0) || (st.limits && st.limits.maxFiles) !== (state.limits && state.limits.maxFiles) || (st.liveStats && st.liveStats.events) !== (state.liveStats && state.liveStats.events) || (st.liveStats && st.liveStats.items) !== (state.liveStats && state.liveStats.items)) {
           state = st
           emit()
         }
@@ -181,6 +181,11 @@ function apply(ctx) {
   async function keepAll() {
     try { await callHost('reviewAll', cwdArg()) } catch (e) {}
     detailCache.clear() // 全部保留后清缓存，避免展开旧 status
+    await refresh()
+  }
+  async function clearReviewed() {
+    try { await callHost('clearReviewed', cwdArg()) } catch (e) {}
+    detailCache.clear()
     await refresh()
   }
   async function keepSession(sessionId) {
@@ -388,6 +393,9 @@ function apply(ctx) {
         item.degraded
           ? React.createElement('span', { className: 'dshdr-note', title: '文件行数过多（超过约 2048×2048 行对），无法精确计算差异，已退化为全量删除+新增' }, '大文件 diff 已简化')
           : null,
+        item.gitOriginal
+          ? React.createElement('span', { className: 'dshdr-note', title: '该文件在基线预算外（或会话开始前未缓存），对比基准来自 git HEAD 而非会话开始前内容——撤销会把文件回退到 HEAD、吞掉未提交工作，故仅可保留' }, '原文来自 git HEAD（仅可保留）')
+          : null,
         React.createElement('label', { className: 'dshdr-switch', title: '仅显示改动行，未改动行折叠为计数' },
           React.createElement('input', { type: 'checkbox', checked: oc, onChange: () => toggleOnlyChanged() }),
           React.createElement('span', null, '只显示改动行'))),
@@ -515,7 +523,8 @@ function apply(ctx) {
     const wsHead = React.createElement('div', { className: 'dshdr-turn-head' },
       React.createElement('span', null, '当前工作区：' + wsTitle),
       React.createElement('span', { className: 'dshdr-turn-actions' },
-        React.createElement('button', { className: 'dshdr-btn primary', onClick: () => keepAll() }, '工作区全部保留')))
+        React.createElement('button', { className: 'dshdr-btn primary', onClick: () => keepAll() }, '工作区全部保留'),
+        React.createElement('button', { className: 'dshdr-btn', onClick: () => clearReviewed(), title: '清除已保留/已撤销的记录（审阅列表瘦身）' }, '清理已处理')))
     if (!known) {
       // 会话标识尚未就绪（刷新后首帧）≠ 会话确实未识别：前者提示"获取中"，稍后自动恢复
       const msg = (snap && snap.hostError === 'host-unreachable')
@@ -580,6 +589,7 @@ function apply(ctx) {
         sessionError ? React.createElement('div', { className: 'dshdr-error', style: { padding: '2px 10px' } }, sessionError) : null,
         liveStatus,
         truncated ? React.createElement('div', { className: 'dshdr-loading' }, '工作区文件数超上限（当前上限 ' + ((snap && snap.limits && snap.limits.maxFiles) || 20000) + ' 个文件），扫描已截断（部分文件未覆盖）。可在 设置 → Diff 审阅插件 调整上限') : null,
+        (snap && snap.skippedCount > 0) ? React.createElement('div', { className: 'dshdr-note', style: { padding: '2px 10px 0' } }, '有 ' + snap.skippedCount + ' 个文件因过大/不可读未纳入审阅（默认上限 2MB）') : null,
         liveBlock,
         sessionBlocks.length === 0
           ? React.createElement('div', { className: 'dshdr-loading' }, '暂无待审阅修改')
@@ -616,7 +626,7 @@ function apply(ctx) {
   }
 
   function EditorSettingsView() {
-    const [cfg, setCfg] = React.useState({ code: '', devenv: '', vsDiffMerge: '', maxFiles: 0, primeMaxFiles: 0, primeMaxChars: 0, detectMode: 'turn', liveRevert: false, respectGitignore: true, extraIgnoreFiles: '' })
+    const [cfg, setCfg] = React.useState({ code: '', devenv: '', vsDiffMerge: '', maxFiles: 0, primeMaxFiles: 0, primeMaxChars: 0, detectMode: 'turn', liveRevert: false, respectGitignore: true, extraIgnoreFiles: '', trackNewFiles: false, liveSupported: false })
     const [status, setStatus] = React.useState(null)
     React.useEffect(() => {
       let alive = true
@@ -629,6 +639,8 @@ function apply(ctx) {
             liveRevert: !!c.liveRevert,
             respectGitignore: c.respectGitignore !== false,
             extraIgnoreFiles: (c.extraIgnoreFiles && Array.isArray(c.extraIgnoreFiles)) ? c.extraIgnoreFiles.join('\n') : '',
+            trackNewFiles: !!c.trackNewFiles,
+            liveSupported: c.liveSupported !== false,
           })
         }
       }).catch(() => {})
@@ -643,6 +655,7 @@ function apply(ctx) {
           liveRevert: cfg.liveRevert,
           respectGitignore: cfg.respectGitignore,
           extraIgnoreFiles: cfg.extraIgnoreFiles || '',
+          trackNewFiles: cfg.trackNewFiles,
         })
         setStatus(r && r.ok === true ? { ok: true, message: '已保存（标准 settings 注册，写入 settings.yaml）' } : { ok: false, message: (r && r.message) || '保存失败' })
       } catch (e) { setStatus({ ok: false, message: '保存失败' }) }
@@ -660,7 +673,7 @@ function apply(ctx) {
         React.createElement('span', null, '检测模式'),
         React.createElement('select', { value: cfg.detectMode, onChange: (e) => setCfg({ ...cfg, detectMode: e.target.value }) },
           React.createElement('option', { value: 'turn' }, '回合结束（默认）'),
-          React.createElement('option', { value: 'live' }, '实时预览（仅 Windows）'))),
+          React.createElement('option', { value: 'live', disabled: !cfg.liveSupported }, '实时预览（' + (cfg.liveSupported ? '仅 Windows' : '当前平台不支持') + '）'))),
       React.createElement('label', { className: 'dshdr-cfg-field', key: 'liveRevert' },
         React.createElement('span', null, '实时预览允许撤销（默认关闭）'),
         React.createElement('input', { type: 'checkbox', checked: cfg.liveRevert, onChange: (e) => setCfg({ ...cfg, liveRevert: e.target.checked }) })),
@@ -670,6 +683,9 @@ function apply(ctx) {
       React.createElement('label', { className: 'dshdr-cfg-field', key: 'extraIgnoreFiles' },
         React.createElement('span', null, '自定义忽略文件（每行一个路径，可工作区外；仅只读匹配）'),
         React.createElement('textarea', { rows: 2, value: cfg.extraIgnoreFiles || '', placeholder: '如 C:\\Users\\you\\.dsh\\extra-ignore.txt（.gitignore 格式）', onChange: (e) => setCfg({ ...cfg, extraIgnoreFiles: e.target.value }) })),
+      React.createElement('label', { className: 'dshdr-cfg-field', key: 'trackNewFiles' },
+        React.createElement('span', null, '跟踪新建文件（默认关闭；开启后新文件也显示，仅可保留不可撤销）'),
+        React.createElement('input', { type: 'checkbox', checked: cfg.trackNewFiles, onChange: (e) => setCfg({ ...cfg, trackNewFiles: e.target.checked }) })),
       React.createElement('h3', null, '外部编辑器路径（留空自动探测）'),
       React.createElement('p', { className: 'dshdr-cfg-desc' }, '通过标准 settings 注册（命名空间 dsh-diff-review），保存后由 settings 服务写入 settings.yaml。配置优先；留空自动探测。'),
       field('code', 'VS Code（code 或 Code.exe 路径）', '如 C:\\Program Files\\Microsoft VS Code\\Code.exe'),
