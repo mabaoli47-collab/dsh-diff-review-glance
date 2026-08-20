@@ -1525,7 +1525,7 @@ export function apply(ctx) {
         if (exec && exec.agent && exec.agent.session && exec.agent.session.id != null) {
           sessionId = String(exec.agent.session.id)
           // 工具调用也是一种会话活动：登记会话→工作区绑定（不影响轮次计数）
-          s = registerSession(exec.agent, null)
+          s = await registerSession(exec.agent, null)
         }
         if (args && typeof args.cwd === 'string') {
           // 安全边界（发布 gate）：调试工具不得把插件的文件读取/写回能力扩展到任意目录。
@@ -1625,13 +1625,37 @@ export function apply(ctx) {
       return t || ''
     } catch (e) { return '' }
   }
-  function registerSession(agent, turn) {
-    if (!agent || !agent.session) return null
-    const sid = agent.session.id != null ? String(agent.session.id) : null
-    const cwd = agent.session.header ? agent.session.header.cwd : null
+  // 会话登记：agent 可能由 typert wire 层注入为 sessionId 字符串（agentSessionId 注释
+  // 已确认两种形状），也可能由模型工具通道注入为完整 agent 对象。对象路径直接读
+  // session.header.cwd；字符串路径从持久化会话 header（sessionPersistence）恢复 cwd——
+  // 否则 registerSession 对字符串返回 null，会话永不登记，dock 永远"未识别"。
+  async function registerSession(agent, turn) {
+    let sid = null
+    let cwd = null
+    let session = null
+    if (agent && typeof agent === 'object' && agent.session) {
+      session = agent.session
+      sid = session.id != null ? String(session.id) : null
+      cwd = session.header ? session.header.cwd : null
+    } else if (typeof agent === 'string' && agent) {
+      sid = agent
+      // 字符串 agent 无 header：从持久化会话 header 恢复 cwd（wire 注入为 sessionId 时的兜底）
+      const persisted = ctx.get('sessionPersistence')
+      if (persisted && typeof persisted.inspect === 'function') {
+        try {
+          const inspected = await persisted.inspect(agent)
+          cwd = inspected && inspected.meta ? inspected.meta.cwd : null
+        } catch (e) { cwd = null }
+      }
+      // 若持久化查询不可用/失败，回退到已有登记记录（同会话曾以对象注入登记过）
+      if (!cwd) {
+        const prev = SESSIONS.get(agent)
+        if (prev) cwd = prev.cwd
+      }
+    }
     if (!sid || !cwd) return null
     const c = canonCwd(cwd)
-    const label = readSessionTitle(agent)
+    const label = session ? readSessionTitle(agent) : ''
     const prevSess = SESSIONS.get(sid)
     SESSIONS.set(sid, {
       cwd: c,
@@ -1644,7 +1668,7 @@ export function apply(ctx) {
       lastTurn: prev ? prev.lastTurn : 0,
       label: label || (prev ? prev.label : ''),
     })
-    s.session = agent.session
+    if (session) s.session = session
     s.lastActivityAt = Date.now()
     if (typeof turn === 'number' && turn > 0) {
       SESSIONS.get(sid).lastTurn = turn
@@ -1655,24 +1679,26 @@ export function apply(ctx) {
   }
   ctx.effect(() => ctx.on('agent/status', (payload) => {
     if (payload && payload.status === 'running' && payload.agent) {
-      const s = registerSession(payload.agent, null)
-      if (s && !s.baseline) ensureBaseline(s)
+      registerSession(payload.agent, null).then((s) => {
+        if (s && !s.baseline) ensureBaseline(s)
+      }).catch(() => {})
     }
   }))
   ctx.effect(() => ctx.on('agent/turn-stopping', (payload) => {
     const agent = payload && payload.agent
     const turn = payload && payload.turn
     if (typeof turn !== 'number') return
-    const s = registerSession(agent, turn)
-    if (s && agent.session && agent.session.id != null) {
-      const sid = String(agent.session.id)
-      ensureBaseline(s)
-      s.scanChain = s.scanChain.then(async () => {
-        await scan(s, sid, turn)
-        // 回合结束定稿：清空实时预览桶（正式审阅项已收录该轮变更），避免旧快照并存
-        if (s.live.size > 0) { s.live.clear(); s.rev++ }
-      }).catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e) })
-    }
+    registerSession(agent, turn).then((s) => {
+      if (s && agent && (typeof agent === 'object' ? agent.session && agent.session.id != null : true)) {
+        const sid = typeof agent === 'string' ? agent : String(agent.session.id)
+        ensureBaseline(s)
+        s.scanChain = s.scanChain.then(async () => {
+          await scan(s, sid, turn)
+          // 回合结束定稿：清空实时预览桶（正式审阅项已收录该轮变更），避免旧快照并存
+          if (s.live.size > 0) { s.live.clear(); s.rev++ }
+        }).catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e) })
+      }
+    }).catch((e) => { console.error('[dsh-diff-review] registerSession 失败', e) })
   }))
 
   // ---- v0.4 typert RPC transport（官方通信通道）----
@@ -1691,22 +1717,22 @@ export function apply(ctx) {
   if (typert && typeof typert.register === 'function') {
     class DiffReviewService extends TypertRemoteService {
       constructor() { super(ctx, 'diffReview') }
-      getState(agent, request) {
+      async getState(agent, request) {
         // 重启后首个 getState 即登记会话（typert 的 agent 由运行时注入，含 session/header/cwd）：
         // live 模式据此建立基线并启动 watcher，不依赖 agent/status 回合事件——
         // 否则重启后第一回合进行中实时预览不生效（store 直到回合结束才创建）
-        registerSession(agent, null)
+        await registerSession(agent, null)
         return handleAction('getState', Object.assign({}, request, { sessionId: agentSessionId(agent) }))
       }
-      getItem(agent, request) { return handleAction('getItem', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
-      review(agent, request) { return handleAction('review', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
-      reviewGroup(agent, request) { return handleAction('reviewGroup', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
-      reviewSession(agent, request) { return handleAction('reviewSession', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
-      reviewAll(agent, request) { return handleAction('reviewAll', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
-      clearReviewed(agent, request) { return handleAction('clearReviewed', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
-      openExternal(agent, request) { return handleAction('openExternal', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
-      getEditorConfig(agent, request) { return handleAction('getEditorConfig', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
-      saveEditorConfig(agent, request) { return handleAction('saveEditorConfig', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      async getItem(agent, request) { await registerSession(agent, null); return handleAction('getItem', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      async review(agent, request) { await registerSession(agent, null); return handleAction('review', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      async reviewGroup(agent, request) { await registerSession(agent, null); return handleAction('reviewGroup', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      async reviewSession(agent, request) { await registerSession(agent, null); return handleAction('reviewSession', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      async reviewAll(agent, request) { await registerSession(agent, null); return handleAction('reviewAll', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      async clearReviewed(agent, request) { await registerSession(agent, null); return handleAction('clearReviewed', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      async openExternal(agent, request) { await registerSession(agent, null); return handleAction('openExternal', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      async getEditorConfig(agent, request) { await registerSession(agent, null); return handleAction('getEditorConfig', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      async saveEditorConfig(agent, request) { await registerSession(agent, null); return handleAction('saveEditorConfig', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
     }
     new DiffReviewService()
     ctx.effect(() => typert.register(hostContribution()))
