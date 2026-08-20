@@ -13,9 +13,9 @@ dsh-diff-review is a **high-privilege local development tool** for the DeepSeek 
 
 ## Trust boundary
 
-Local loopback plus the host's listening address. The plugin never uploads data — all communication is local browser ↔ host traffic.
+The dsh host process plus the local browser. The plugin never uploads data — all communication is local browser ↔ host traffic.
 
-Transport: the official **typert RPC** (`dsh-typert-protocol`), where the calling `agent` is injected by the runtime, so session binding cannot be forged. A `webServer` HTTP route is kept as a **transitional fallback** and is guarded against CSRF (Origin check), DNS rebinding (loopback Host allowlist) and non-loopback clients (remote-address check); it will be deleted once the typert migration is fully verified.
+Transport: the official **typert RPC** (`dsh-typert-protocol`), where the calling `agent` is injected by the runtime, so session binding cannot be forged. **Typert is the only channel** (v0.8 removed the transitional `webServer` HTTP route and the client fetch fallback), so there is no HTTP attack surface.
 
 The realtime preview bucket (`live`) is workspace-level data (`sessionId='(live)'`): reads are not bound to the initiating session; writes (revert) come only from a same-origin local client and are gated by `liveRevert` plus version-conflict protection.
 
@@ -25,4 +25,4 @@ Open a GitHub issue or pull request. Given the plugin's local-only trust model, 
 
 ## Known residual risks
 
-See "Risk disclosure" in [README.md](README.md): best-effort sensitive-file filtering, the revert/redo TOCTOU window, temp-file permissions on Windows/networked filesystems, the transitional HTTP route, the `drvw_debug` model tool, memory growth, and the two-writer race when `liveRevert` is enabled.
+See "Risk disclosure" in [README.md](README.md): best-effort sensitive-file filtering, the revert/redo TOCTOU window, temp-file permissions on Windows/networked filesystems, the `drvw_debug` model tool, memory growth, and the two-writer race when `liveRevert` is enabled.

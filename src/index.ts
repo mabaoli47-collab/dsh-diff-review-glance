@@ -1,6 +1,6 @@
 // dsh-diff-review host half (formal plugin)
 // 从动态插件 v5.5 固化；v0.4 起通信迁移到官方 typert RPC（agent 注入，天然会话绑定），
-// webServer HTTP 路由为过渡保留（待 client 全切后删除）
+// v0.8 起移除 webServer 过渡 HTTP 路由——typert 为唯一通道，无 HTTP 攻击面
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { tmpdir } from 'node:os'
@@ -13,12 +13,11 @@ import { hostContribution } from './host/typert.js'
 
 export const name = 'dsh-diff-review'
 // 只声明根组合顶层可见的服务；shell/sandboxPolicy 是 scoped/可选服务，用 ctx.get 惰性读取
-export const inject = ['fs', 'webServer', 'tools', 'settings']
+export const inject = ['fs', 'tools', 'settings']
 
 export function apply(ctx) {
   const fs = ctx.get('fs')
   if (fs === undefined) return
-  const webServer = ctx.get('webServer')
   const tools = ctx.get('tools')
   const shell = ctx.get('shell')
   const sandboxPolicy = ctx.get('sandboxPolicy')
@@ -31,7 +30,6 @@ export function apply(ctx) {
   const PRIME_MAX_FILES = 6000
   const PRIME_MAX_CHARS = 48 * 1024 * 1024
   const CONFIG_NS = 'dsh-diff-review'
-  const ROUTE = '/dsh-diff-review'
 
   // 多基线设计：每个工作区（cwd）一个独立状态桶
   const STORES = new Map()
@@ -824,8 +822,8 @@ export function apply(ctx) {
   }
 
   // ---- 业务动作分发 ----
-  // 两个入口共用：v0.4 的 typert DiffReviewService（agent 注入，主通道）与
-  // webServer 过渡路由（client 回退用）。动作 + args 的契约一致。
+  // 唯一入口：typert DiffReviewService（agent 由运行时注入，会话绑定不可伪造）。
+  // 动作 + args 的契约由 client 侧 TYPERT_REMOTE 描述符与 src/host/typert.ts 保持一致。
   async function handleAction(action, args) {
     switch (action) {
       case 'getEditorConfig': return readConfig()
@@ -1089,103 +1087,6 @@ export function apply(ctx) {
     }
   }
 
-  // ---- webServer 路由（过渡）：POST /dsh-diff-review  { action, args } → JSON ----
-  // v0.4 起主通道为 typert；此路由供 client 在 typert 未就绪时回退，迁移验证完成后删除。
-  const BODY_MAX_BYTES = 1024 * 1024
-  function readBody(req) {
-    return new Promise((resolve, reject) => {
-      const chunks = []
-      let size = 0
-      req.on('data', (chunk) => {
-        size += chunk.length
-        if (size > BODY_MAX_BYTES) {
-          reject(new Error('request body too large'))
-          req.destroy()
-          return
-        }
-        chunks.push(chunk)
-      })
-      req.on('end', () => {
-        try {
-          const raw = Buffer.concat(chunks).toString('utf8')
-          resolve(raw ? JSON.parse(raw) : {})
-        } catch (e) { reject(e) }
-      })
-      req.on('error', reject)
-      // 客户端提前断开：data/end 都不会再触发，close 兜底拒绝，避免 Promise 永久挂起
-      // （resolve 之后再 reject 是无效操作，安全）
-      req.on('close', () => reject(new Error('request closed')))
-    })
-  }
-  function sendJson(res, status, value) {
-    const body = JSON.stringify(value)
-    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-    res.end(body)
-  }
-  // Host 回环白名单校验：防 DNS 重绑定攻击（恶意域名解析到 127.0.0.1 时，
-  // 请求的 Host/Origin 都是 evil.com，仅靠 Origin 同源比较会被绕过）。
-  // 允许 localhost / 127.0.0.1 / [::1]，或与服务器实际监听地址（socket.localAddress）一致。
-  // 另外强制客户端来源（remoteAddress）必须为回环：即使宿主把 webServer 绑到
-  // 0.0.0.0/局域网地址（用户主动暴露），本插件的本地 API 也拒绝接受远程客户端——
-  // 局域网内其他主机用 curl 伪造 Host 也无法通过
-  function hostAllowed(req) {
-    const remote = req.socket && req.socket.remoteAddress
-    if (remote) {
-      const r = remote.toLowerCase()
-      // 接受整个 127.0.0.0/8 回环段（127.0.0.1、127.0.0.2…）以及 ::1：
-      // 用户把 webServer 绑到 127.0.0.2 或本机经回环段访问时不被误伤
-      const remoteLoop = r === '::1' || r === '::ffff:127.0.0.1' || r.startsWith('127.')
-      if (!remoteLoop) return false
-    }
-    const host = req.headers && req.headers.host
-    if (!host || typeof host !== 'string') return false
-    let hostname = host
-    if (hostname.startsWith('[')) {
-      const m = hostname.match(/^\[([^\]]+)\]/)
-      hostname = m ? m[1] : hostname
-    } else {
-      hostname = hostname.split(':')[0]
-    }
-    hostname = hostname.toLowerCase()
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return true
-    const local = req.socket && req.socket.localAddress
-    if (local) {
-      const l = local.toLowerCase()
-      if (hostname === l || (l.startsWith('::ffff:') && hostname === l.slice(7))) return true
-    }
-    return false
-  }
-  if (webServer && typeof webServer.register === 'function') {
-    ctx.effect(() => webServer.register({
-      kind: 'exact',
-      path: ROUTE,
-      async handler(req, res) {
-        try {
-          if (req.method !== 'POST') return sendJson(res, 405, { ok: false, message: 'method not allowed' })
-          // 所有请求（含读操作）校验 Host 回环白名单 + 客户端来源回环：读接口泄露
-          // 工作区路径与 diff 内容，DNS 重绑定下恶意站点可同源读取，必须一并拦截
-          if (!hostAllowed(req)) return sendJson(res, 403, { ok: false, message: 'forbidden host' })
-          const body = await readBody(req)
-          const action = body && body.action
-          // 所有动作（含读）统一校验 Origin 同源：浏览器跨站请求携带 Origin 头（不可伪造），
-          // 必须与 Host 同源才放行——挡住恶意网页 CSRF 触发写操作，也挡住宿主配置了
-          // 宽松 CORS 时跨站读取 getState/getItem。
-          // 无 Origin 头（GUI 同源 fetch、本地客户端）放行：本地进程本就有完整文件权限。
-          const origin = req.headers && req.headers.origin
-          const host = req.headers && req.headers.host
-          if (origin && !(host && (origin === 'http://' + host || origin === 'https://' + host))) {
-            return sendJson(res, 403, { ok: false, message: 'forbidden origin' })
-          }
-          const args = body && body.args
-          const result = await handleAction(action, args)
-          sendJson(res, 200, result)
-        } catch (e) {
-          sendJson(res, 500, { ok: false, message: (e && e.message) || String(e) })
-        }
-      },
-    }))
-  }
-
   // ---- 标准工具注册：drvw_debug（defineTool 生成精确 ToolDefinition 再 register，与动态版 harness.defineTool 同源） ----
   if (tools && typeof tools.register === 'function') {
     const debugTool = defineTool({
@@ -1428,5 +1329,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.7.0），typert 路由 + webServer 过渡路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.8.0），typert 唯一通道（无 HTTP 路由）')
 }
