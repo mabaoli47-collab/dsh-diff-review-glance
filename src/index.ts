@@ -1124,5 +1124,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.4.3），typert 路由 + webServer 过渡路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.4.4），typert 路由 + webServer 过渡路由:', ROUTE)
 }

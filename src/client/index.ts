@@ -230,22 +230,25 @@ function apply(ctx) {
     '.dshdr-switch { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; font-size: 11px; color: rgba(128,128,128,0.95); cursor: pointer; user-select: none; white-space: nowrap; }\n' +
     '.dshdr-switch input { accent-color: #2ea043; cursor: pointer; }\n' +
     '.dshdr-note { font-size: 11px; color: rgba(128,128,128,0.9); }\n' +
-    '.dshdr-cols { display: grid; grid-template-columns: 3.4em 1fr 3.4em 1fr; border-bottom: 1px solid rgba(128,128,128,0.3); }\n' +
+    '.dshdr-cols { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid rgba(128,128,128,0.3); }\n' +
     '.dshdr-cols > div { padding: 3px 8px; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: rgba(128,128,128,0.9); }\n' +
-    // 左右两栏 1fr 等宽；每个文本单元格 min-width:0 + overflow-x:auto ——
-    // 原内容栏与修改后栏各自横向滚动查看长行（不截断、不撑开整表）
-    '.dshdr-scroll { max-height: 360px; overflow: auto; }\n' +
-    '.dshdr-row { display: grid; grid-template-columns: 3.4em 1fr 3.4em 1fr; }\n' +
-    '.dshdr-row .dshdr-ln { padding: 0 6px; text-align: right; color: rgba(128,128,128,0.8); background: rgba(128,128,128,0.08); user-select: none; }\n' +
-    '.dshdr-row .dshdr-txt { padding: 0 8px; white-space: pre; min-width: 0; overflow-x: auto; }\n' +
-    '.dshdr-row.dshdr-ctx .dshdr-txt { background: transparent; }\n' +
+    // 两栏布局：左右各一个面板，面板级横向滚动（左=修改前、右=修改后，各自滚长行）；
+    // 纵向滚动由外层 .dshdr-scroll 统一承担（左右行号保持同步）
+    '.dshdr-scroll { max-height: 360px; overflow-y: auto; overflow-x: hidden; }\n' +
+    '.dshdr-diff-body { display: grid; grid-template-columns: 1fr 1fr; }\n' +
+    '.dshdr-pane { min-width: 0; }\n' +
+    '.dshdr-pane + .dshdr-pane { border-left: 1px solid rgba(128,128,128,0.2); }\n' +
+    '.dshdr-pane-scroll { overflow-x: auto; }\n' +
+    '.dshdr-pane-row { display: grid; grid-template-columns: 3.4em minmax(0, 1fr); }\n' +
+    '.dshdr-pane-row .dshdr-ln { padding: 0 6px; text-align: right; color: rgba(128,128,128,0.8); background: rgba(128,128,128,0.08); user-select: none; }\n' +
+    '.dshdr-pane-row .dshdr-txt { padding: 0 8px; white-space: pre; }\n' +
+    '.dshdr-pane-row.dshdr-row-del .dshdr-txt { background: rgba(248,81,73,0.18); }\n' +
+    '.dshdr-pane-row.dshdr-row-add .dshdr-txt { background: rgba(46,160,67,0.2); }\n' +
+    '.dshdr-pane-row.dshdr-row-del .dshdr-ln { background: rgba(248,81,73,0.14); }\n' +
+    '.dshdr-pane-row.dshdr-row-add .dshdr-ln { background: rgba(46,160,67,0.16); }\n' +
     '.dshdr-collapsed { text-align: center; font-size: 11px; color: rgba(128,128,128,0.8); padding: 1px 0; border-top: 1px dashed rgba(128,128,128,0.3); border-bottom: 1px dashed rgba(128,128,128,0.3); background: rgba(128,128,128,0.06); }\n' +
-    '.dshdr-txt-del { background: rgba(248,81,73,0.18); }\n' +
-    '.dshdr-txt-add { background: rgba(46,160,67,0.2); }\n' +
-    '.dshdr-row .dshdr-ln-del { background: rgba(248,81,73,0.14); }\n' +
-    '.dshdr-row .dshdr-ln-add { background: rgba(46,160,67,0.16); }\n' +
     '.dshdr-hl { background: rgba(248,81,73,0.5); }\n' +
-    '.dshdr-txt-add .dshdr-hl { background: rgba(46,160,67,0.55); }\n' +
+    '.dshdr-row-add .dshdr-hl { background: rgba(46,160,67,0.55); }\n' +
     '.dshdr-error { color: #f85149; font-size: 12px; padding: 2px 10px 6px; }\n' +
     '.dshdr-info { color: #2ea043; font-size: 12px; padding: 2px 10px 6px; }\n' +
     '.dshdr-loading { color: rgba(128,128,128,0.9); font-size: 12px; padding: 6px 10px; }\n' +
@@ -266,38 +269,47 @@ function apply(ctx) {
     const map = { pending: '待审阅', kept: '已保留', reverted: '已撤销' }
     return React.createElement('span', { className: 'dshdr-badge dshdr-badge-' + status }, map[status] || status)
   }
-  function LineText({ line }) {
-    if (!line.hl) return line.t
-    const { s, e } = line.hl
+  function LineTextPane({ t, hl }) {
+    if (!hl) return t
+    const { s, e } = hl
     const children = []
-    if (s > 0) children.push(line.t.slice(0, s))
-    children.push(React.createElement('span', { key: 'hl', className: 'dshdr-hl' }, line.t.slice(s, e)))
-    if (e < line.t.length) children.push(line.t.slice(e))
+    if (s > 0) children.push(t.slice(0, s))
+    children.push(React.createElement('span', { key: 'hl', className: 'dshdr-hl' }, t.slice(s, e)))
+    if (e < t.length) children.push(t.slice(e))
     return children
   }
-  function rowEl(row, key) {
-    if (row.k === 'c') {
-      return React.createElement('div', { key, className: 'dshdr-row dshdr-ctx' },
-        React.createElement('span', { className: 'dshdr-ln' }, row.o),
-        React.createElement('span', { className: 'dshdr-txt' }, row.t),
-        React.createElement('span', { className: 'dshdr-ln' }, row.n),
-        React.createElement('span', { className: 'dshdr-txt' }, row.t))
+  // 结构化行流 → 左右两栏（左=修改前旧行，右=修改后新行；ctx 行两侧同文本，del/add 只落各自侧）
+  function buildPaneRows(rows) {
+    const left = []
+    const right = []
+    for (const row of rows) {
+      if (row.k === 'collapsed') { left.push({ k: 'collapsed', n: row.n }); continue }
+      if (row.k === 'c') {
+        left.push({ k: 'c', ln: row.o, t: row.t, hl: null })
+        right.push({ k: 'c', ln: row.n, t: row.t, hl: null })
+      } else {
+        if (row.o) left.push({ k: 'p', ln: row.o.n, t: row.o.t, hl: row.o.hl, kind: 'del' })
+        if (row.n) right.push({ k: 'p', ln: row.n.n, t: row.n.t, hl: row.n.hl, kind: 'add' })
+      }
     }
-    const o = row.o
-    const n = row.n
-    return React.createElement('div', { key, className: 'dshdr-row dshdr-pair' },
-      React.createElement('span', { className: 'dshdr-ln dshdr-ln-del' }, o ? o.n : ''),
-      React.createElement('span', { className: 'dshdr-txt dshdr-txt-del' }, o ? React.createElement(LineText, { line: o }) : ''),
-      React.createElement('span', { className: 'dshdr-ln dshdr-ln-add' }, n ? n.n : ''),
-      React.createElement('span', { className: 'dshdr-txt dshdr-txt-add' }, n ? React.createElement(LineText, { line: n }) : ''))
+    return { left, right }
   }
-  function collapsedBar(n) {
-    return React.createElement('div', { className: 'dshdr-collapsed' }, n + ' 行未改动')
+  function paneRowEl(row, key) {
+    if (row.k === 'collapsed') {
+      return React.createElement('div', { key, className: 'dshdr-collapsed' }, row.n + ' 行未改动')
+    }
+    const cls = row.kind ? 'dshdr-pane-row dshdr-row-' + row.kind : 'dshdr-pane-row'
+    return React.createElement('div', { key, className: cls },
+      React.createElement('span', { className: 'dshdr-ln' }, row.ln),
+      React.createElement('span', { className: 'dshdr-txt' }, React.createElement(LineTextPane, { t: row.t, hl: row.hl })))
   }
   function buildNormalRows(hunks) {
     const rows = []
     for (const hunk of hunks) {
-      for (const row of hunk.rows) rows.push(rowEl(row, rows.length))
+      for (const row of hunk.rows) {
+        if (row.k === 'c') rows.push({ k: 'c', o: row.o, n: row.n, t: row.t })
+        else rows.push({ k: 'p', o: row.o, n: row.n })
+      }
     }
     return rows
   }
@@ -305,7 +317,7 @@ function apply(ctx) {
     const rows = []
     let ctxCount = 0
     const flush = () => {
-      if (ctxCount > 0) { rows.push(collapsedBar(ctxCount)); ctxCount = 0 }
+      if (ctxCount > 0) { rows.push({ k: 'collapsed', n: ctxCount }); ctxCount = 0 }
     }
     for (let hi = 0; hi < hunks.length; hi++) {
       const hunk = hunks[hi]
@@ -325,7 +337,7 @@ function apply(ctx) {
       for (const row of hunk.rows) {
         if (row.k === 'c') { ctxCount++; continue }
         flush()
-        rows.push(rowEl(row, rows.length))
+        if (row.o || row.n) rows.push({ k: 'p', o: row.o, n: row.n })
       }
     }
     flush()
@@ -342,6 +354,10 @@ function apply(ctx) {
         React.createElement('div', { className: 'dshdr-missing' }, React.createElement('pre', null, item.current)))
     }
     const rows = oc ? buildOnlyChangedRows(item.hunks) : buildNormalRows(item.hunks)
+    const { left, right } = buildPaneRows(rows)
+    const pane = (list, key) => React.createElement('div', { key, className: 'dshdr-pane' },
+      React.createElement('div', { className: 'dshdr-pane-scroll' },
+        list.map((r, i) => paneRowEl(r, i))))
     return React.createElement('div', { className: 'dshdr-diff' },
       React.createElement('div', { className: 'dshdr-diff-head' },
         React.createElement('span', { className: 'dshdr-path' }, item.relPath),
@@ -353,10 +369,11 @@ function apply(ctx) {
           React.createElement('span', null, '只显示改动行'))),
       React.createElement('div', { className: 'dshdr-cols' },
         React.createElement('div', null, '原内容'),
-        React.createElement('div', null, ''),
-        React.createElement('div', null, '修改后'),
-        React.createElement('div', null, '')),
-      React.createElement('div', { className: 'dshdr-scroll' }, rows))
+        React.createElement('div', null, '修改后')),
+      React.createElement('div', { className: 'dshdr-scroll' },
+        React.createElement('div', { className: 'dshdr-diff-body' },
+          pane(left, 'left'),
+          pane(right, 'right'))))
   }
   function actionsFor(item) {
     // gitOriginal：原文来自 git HEAD 非会话基线，撤销会回退到 HEAD 吞掉未提交工作——仅允许保留
