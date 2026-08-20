@@ -120,7 +120,7 @@ function apply(ctx) {
             state = Object.assign({}, state, { hostError: 'old-host', sessionKnown: false, loading: false })
             emit()
           }
-        } else if (st.hostError !== state.hostError || !!st.sessionKnown !== !!state.sessionKnown || st.pendingCount !== state.pendingCount || (st.sessions || []).length !== (state.sessions || []).length || st.rev !== state.rev || !!st.loading !== !!state.loading || st.maxTurn !== state.maxTurn || st.workspaceId !== state.workspaceId || st.detectMode !== state.detectMode || !!st.liveRevert !== !!state.liveRevert || !!st.respectGitignore !== !!state.respectGitignore || !!st.watcherActive !== !!state.watcherActive || (st.liveError || '') !== (state.liveError || '') || (st.liveStats && st.liveStats.events) !== (state.liveStats && state.liveStats.events) || (st.liveStats && st.liveStats.items) !== (state.liveStats && state.liveStats.items)) {
+        } else if (st.hostError !== state.hostError || !!st.sessionKnown !== !!state.sessionKnown || st.pendingCount !== state.pendingCount || (st.sessions || []).length !== (state.sessions || []).length || st.rev !== state.rev || !!st.loading !== !!state.loading || st.maxTurn !== state.maxTurn || st.workspaceId !== state.workspaceId || st.detectMode !== state.detectMode || !!st.liveRevert !== !!state.liveRevert || !!st.respectGitignore !== !!state.respectGitignore || !!st.watcherActive !== !!state.watcherActive || (st.liveError || '') !== (state.liveError || '') || !!st.truncated !== !!state.truncated || (st.limits && st.limits.maxFiles) !== (state.limits && state.limits.maxFiles) || (st.liveStats && st.liveStats.events) !== (state.liveStats && state.liveStats.events) || (st.liveStats && st.liveStats.items) !== (state.liveStats && state.liveStats.items)) {
           state = st
           emit()
         }
@@ -147,6 +147,8 @@ function apply(ctx) {
     itemSeqs.set(itemId, seq)
     try {
       const d = await callHost('getItem', Object.assign({ itemId }, cwdArg()))
+      // 错误对象（记录不存在/无权限）不缓存为 detail，返回给 ItemRow 展示错误而非卡"加载 diff…"
+      if (d && d.ok === false) return { error: d.message || '记录不存在' }
       if (seq === itemSeqs.get(itemId) && d) detailCache.set(itemId, d)
       return seq === itemSeqs.get(itemId) ? d : null
     } catch (e) { return null }
@@ -160,12 +162,21 @@ function apply(ctx) {
   }
   async function doReviewGroup(turn, action) {
     // 轮次归属会话：turn 仅会话内唯一，必须携带当前会话 id，host 端按 sessionId::turn 精确定位
-    try { await callHost('reviewGroup', Object.assign({ turn, action }, cwdArg())) } catch (e) {}
+    let results = null
+    try { results = await callHost('reviewGroup', Object.assign({ turn, action }, cwdArg())) } catch (e) {}
+    // 逐项失败不静默：收集失败结果供调用方（TurnTailView）展示
+    let firstError = null
+    if (results && Array.isArray(results.results)) {
+      for (const r of results.results) {
+        if (r && r.result && r.result.ok === false && r.result.message) { firstError = r.result.message; break }
+      }
+    }
     const prefix = (currentSessionId || '') + '::' + turn + '::'
     for (const key of Array.from(detailCache.keys())) {
       if (key.indexOf(prefix) === 0) detailCache.delete(key)
     }
     await refresh()
+    return firstError
   }
   async function keepAll() {
     try { await callHost('reviewAll', cwdArg()) } catch (e) {}
@@ -173,10 +184,10 @@ function apply(ctx) {
     await refresh()
   }
   async function keepSession(sessionId) {
-    // cwdArg() 在前、目标 sessionId 在后覆盖：否则 { sessionId } 会被 cwdArg() 的
-    // { sessionId: currentSessionId } 覆盖，导致点击其他会话的"本会话全部保留"时
-    // 误操作当前会话（严重 UI 逻辑 bug）
-    try { await callHost('reviewSession', Object.assign({}, cwdArg(), { sessionId })) } catch (e) {}
+    // 目标会话经 targetSessionId 显式传递：host 侧 sessionId 由 agent 覆盖（不可伪造），
+    // targetSessionId 用于定位目标会话并校验其与当前 agent 同工作区——
+    // 修复 typert 迁移期"点 B 会话按钮实际保留 A 会话"的静默错位
+    try { await callHost('reviewSession', Object.assign({}, cwdArg(), { targetSessionId: sessionId })) } catch (e) {}
     // 前缀精确匹配（startsWith 比 indexOf 切割更稳：item id 为 sessionId::turn::path）
     for (const key of Array.from(detailCache.keys())) {
       if (key.indexOf(sessionId + '::') === 0) detailCache.delete(key)
@@ -184,7 +195,17 @@ function apply(ctx) {
     await refresh()
   }
 
-  ctx.effect(() => ctx.interval(() => refresh(), 2000))
+  ctx.effect(() => ctx.interval(() => {
+    // 页面不可见时暂停轮询（无意义请求）；恢复可见后下一个 tick 自动恢复
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+    refresh()
+  }, 2000))
+  ctx.effect(() => {
+    if (typeof document === 'undefined') return
+    const onVis = () => { if (!document.hidden) refresh() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  })
   refresh()
 
   injectCss('\n' +
@@ -394,7 +415,11 @@ function apply(ctx) {
     const [openMenu, setOpenMenu] = React.useState(false)
 
     async function toggle() {
-      if (!open && detail === null) setDetail(await fetchItem(item.id))
+      if (!open && detail === null) {
+        const d = await fetchItem(item.id)
+        if (d && d.error) { setError(d.error); setOpen(true); return }
+        setDetail(d)
+      }
       setOpen(!open)
     }
     async function act(action) {
@@ -456,7 +481,8 @@ function apply(ctx) {
   }
 
   function DockPanel(props) {
-    resolveCurrentSession(props)
+    // 会话解析放入 effect：避免渲染期副作用（内部可能触发 refresh 网络请求）
+    React.useEffect(() => { resolveCurrentSession(props) }, [props && props.sessionId])
     const [snap, setSnap] = React.useState(getSnapshot())
     React.useEffect(() => subscribe(setSnap), [])
     const [open, setOpen] = React.useState(false)
@@ -488,7 +514,7 @@ function apply(ctx) {
       const msg = (snap && snap.hostError === 'host-unreachable')
         ? '未能连接插件宿主（host 半未加载）。请重启 dsh 并刷新页面'
         : (snap && snap.hostError === 'old-host')
-          ? '宿主版本过旧：客户端 v0.3.7 与旧版宿主不兼容。请重启 dsh 使宿主加载新版本'
+          ? '宿主版本过旧：与当前客户端不兼容。请重启 dsh 使宿主加载新版本'
           : currentSessionId
             ? '当前会话尚无对话记录，等待首个回合结束后自动识别工作区'
             : '正在获取会话信息…'
@@ -550,10 +576,12 @@ function apply(ctx) {
   }
 
   function TurnTailView(props) {
-    resolveCurrentSession(props)
+    // 会话解析放入 effect：避免渲染期副作用（内部可能触发 refresh 网络请求）
+    React.useEffect(() => { resolveCurrentSession(props) }, [props && props.sessionId])
     const turn = props && props.matched ? props.matched.turn : null
     const [snap, setSnap] = React.useState(getSnapshot())
     const [open, setOpen] = React.useState(false)
+    const [groupError, setGroupError] = React.useState(null)
     React.useEffect(() => subscribe(setSnap), [])
     React.useEffect(() => { refresh() }, [turn])
     // 轮次归属会话：仅匹配当前会话的该轮次（turn 仅会话内唯一，跨会话同号轮次不得串数据）
@@ -565,12 +593,13 @@ function apply(ctx) {
       React.createElement('span', { className: 'dshdr-toggle' }, open ? '收起' : '展开'),
       React.createElement('span', null, '第 ' + turn + ' 段对话的文件修改（' + items.length + ' 个文件' + (pendingCount > 0 ? '，' + pendingCount + ' 项待审阅' : '') + '）'),
       React.createElement('span', { className: 'dshdr-turn-actions' },
-        React.createElement('button', { className: 'dshdr-btn primary', onClick: (e) => { e.stopPropagation(); doReviewGroup(turn, 'keep') } }, '本段全部保留'),
+        React.createElement('button', { className: 'dshdr-btn primary', onClick: async (e) => { e.stopPropagation(); setGroupError(await doReviewGroup(turn, 'keep')) } }, '本段全部保留'),
         pendingCount > 0
-          ? React.createElement('button', { className: 'dshdr-btn danger', onClick: (e) => { e.stopPropagation(); doReviewGroup(turn, 'revert') } }, '本段全部撤销')
+          ? React.createElement('button', { className: 'dshdr-btn danger', onClick: async (e) => { e.stopPropagation(); setGroupError(await doReviewGroup(turn, 'revert')) } }, '本段全部撤销')
           : null))
     return React.createElement('div', { className: 'dshdr-turn' },
       head,
+      groupError ? React.createElement('div', { className: 'dshdr-error', style: { padding: '0 10px' } }, groupError) : null,
       open ? React.createElement('div', { className: 'dshdr-list' },
         items.map(item => React.createElement(ItemRow, { key: item.id, item, showTurn: false }))) : null)
   }

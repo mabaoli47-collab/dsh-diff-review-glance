@@ -65,7 +65,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 ## 工作原理
 
 - **多基线 + 会话层**：`STORES: Map<cwd, store>` 每个工作区独立状态桶（基线 / 版本快照 / 内容缓存 / 分组 / 待审阅项）；`SESSIONS: Map<sessionId, {cwd, lastTurn, label}>` 会话注册表；轮次键为 `sessionId::turn`，审阅项 id 为 `sessionId::turn::path`（同一工作区多会话、同号轮次互不冲突）
-- **会话隔离模型**：正式审阅项严格归属会话（`sessionId::turn::path`，跨会话读取/操作被拒绝）；**实时预览桶（live）是工作区级数据**（`sessionId='(live)'`，不归属特定会话）——任何已登记会话的客户端均可读取/展开其 diff（内容与正式审阅项同源），对它的写操作受 `liveRevert` 门控与 `applyFileWrite` 版本冲突保护
+- **会话隔离模型**：操作范围 = **当前 agent 所在工作区**（typert agent 由运行时注入、不可伪造，pickStore 按会话定位工作区 store）。工作区内跨会话的正式/live 项均可读取与操作（dock 按会话分组的全工作区审阅由此成立；「本会话全部保留」经 `targetSessionId` 显式指定目标会话，须与当前 agent 同工作区）；**跨工作区完全隔离**。实时预览桶（live）为工作区级数据（`sessionId='(live)'`）。
 - **检测时机**：`agent/turn-stopping`（回合结束）触发全量 `walkWorkspace` 版本对比（默认，跨平台）；`detectMode=live` 时额外用 `fs.watch` 递归监听工作区，事件去抖 600ms 后做**单文件/全量增量比对**（watcher 只当触发器，正确性仍以版本对比为准，回合末全量扫描保留为兜底——watcher 丢事件只会延迟不会漏检；另有 8 秒事件静默自动全量兜底），实时变更挂 `store.live` 预览桶，**开启 `liveRevert` 后可在进行中撤销**（`applyFileWrite` 版本冲突保护：AI 已改过则拒绝；撤销成功后该项冻结、文件恢复会话基线，回合扫描因 `original===current` 天然不重复产生正式项），回合结束正式扫描后清空并入正式审阅项
 - **仅跟踪修改**：新文件只缓存不产生审阅项（符合「仅包括修改」）；文件版本变化才生成 diff
 - **通信（v0.4 起）**：host 通过**官方 typert RPC**（`dsh-typert-protocol`）暴露服务——调用方 `agent` 由运行时注入，**会话绑定不可伪造**；client 经 `ctx.remote` 挂载描述符后调用命名空间方法。**typert 为唯一通道**（v0.8 起移除过渡 HTTP 路由），无 HTTP 攻击面。
@@ -130,6 +130,7 @@ npm test        # vitest 单元测试（纯函数：路径/边界/敏感名单/d
 | v0.10.0 | **健壮性**：实时检查挂入 scanChain 串行队列（不与回合扫描并发）；`removeLivePath` 改精确路径匹配（POSIX 大小写敏感）；外部 diff 临时文件 2 小时后自动清理；live 块 UI 标注「工作区级」 |
 | v0.11.0 | **敏感加强（.gitignore）**：工作区根 `.gitignore` 中忽略的文件不读入基线、不产生审阅项、不可撤销（纯函数匹配器 + 单测；仅支持根 `.gitignore`） |
 | v0.11.1 | `.gitignore` 排除改为设置项 **`respectGitignore`**（默认开启，可关闭） |
+| v0.12.0 | **评审修复**：跨会话操作统一为「当前工作区」语义（reviewSession 支持 `targetSessionId` 同工作区校验；getItem 返回错误对象不再卡「加载 diff…」）；live 静默兜底改**指数退避**（空闲不再每 5 秒全量扫描）；`agentSessionId` 显式取值；调试扫描独立会话 + 不推进基线；基线失败可重试；state 比对补 `truncated`/`limits`；渲染期副作用移入 effect；页面隐藏暂停轮询；清理死代码/版本文案 |
 
 ## 许可
 

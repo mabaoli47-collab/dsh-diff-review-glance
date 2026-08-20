@@ -17,7 +17,7 @@ The dsh host process plus the local browser. The plugin never uploads data — a
 
 Transport: the official **typert RPC** (`dsh-typert-protocol`), where the calling `agent` is injected by the runtime, so session binding cannot be forged. **Typert is the only channel** (v0.8 removed the transitional `webServer` HTTP route and the client fetch fallback), so there is no HTTP attack surface.
 
-The realtime preview bucket (`live`) is workspace-level data (`sessionId='(live)'`): reads are not bound to the initiating session; writes (revert) come only from a same-origin local client and are gated by `liveRevert` plus version-conflict protection.
+The operation scope is the **current agent's workspace**: the typert `agent` is injected by the runtime and unforgeable, and `pickStore` locates the workspace store by session, so cross-workspace access is impossible. Within a workspace, formal and live items of any session can be read and acted on (the per-session groups in the dock are UI organization); "keep all in session" passes an explicit `targetSessionId` that must share the current agent's workspace, and live writes are gated by `liveRevert` plus version-conflict protection.
 
 ## Reporting
 

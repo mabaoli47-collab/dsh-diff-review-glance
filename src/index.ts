@@ -77,6 +77,7 @@ export function apply(ctx) {
       _lastLiveCheckAt: 0, // 最近一次实时检查时间戳（兜底节流）
       _liveEventCount: 0, // 已收到的事件计数（getState 暴露，便于诊断）
       _liveCheckCount: 0, // 已执行的实时检查计数
+      _fallbackMs: 5000, // 静默兜底间隔（连续无变更时指数退避 5s→…→80s；有事件/有变更复位）
       sessions: new Map(), // sessionId -> { lastTurn, label }：本工作区关联的会话（反向索引）
       lastTurn: 0,
       rev: 0,
@@ -228,6 +229,8 @@ export function apply(ctx) {
       } catch (e) {
         s.baselineError = (e && e.message) || String(e)
         console.error('[dsh-diff-review] baseline 失败', e)
+        // 失败后清空 baseline 引用：下次 ensureBaseline 触发重建（否则永久退化为 git 补读/原始未知）
+        s.baseline = null
       } finally {
         s.baselineLoading = false
       }
@@ -329,13 +332,16 @@ export function apply(ctx) {
   }
   // 事件静默兜底：Windows fs.watch 事件可能丢失（或沙箱拦截 file watching），
   // 若长时间没有事件到达，定期做一次全量版本对比保证不漏检。
-  // 只在 live 模式下运行；事件正常时（8 秒内有事件）自动跳过，几乎零开销。
+  // 只在 live 模式下运行；事件正常时（8 秒内有事件）自动跳过。
+  // 兜底间隔按"连续无变更"指数退避（5s→10s→…→80s）：空闲工作区不会每 5 秒全量扫描。
   function ensureLiveFallbackTimer(s) {
     if (s.liveTimer || readConfig().detectMode !== 'live') return
     s.liveTimer = setInterval(() => {
       if (readConfig().detectMode !== 'live') return
       const now = Date.now()
-      if (now - (s._lastLiveEventAt || 0) > 8000 && now - (s._lastLiveCheckAt || 0) > 4000) {
+      // 从未收到事件（watcher 可能完全失效）或事件静默超过 8 秒时兜底；
+      // 间隔受 _fallbackMs 退避约束（有事件时 _lastLiveEventAt 持续刷新，自然跳过）
+      if ((s._lastLiveEventAt === 0 || now - s._lastLiveEventAt > 8000) && now - (s._lastLiveCheckAt || 0) >= (s._fallbackMs || 5000)) {
         queueLiveCheck(s)
       }
     }, 5000)
@@ -343,6 +349,7 @@ export function apply(ctx) {
   function scheduleLiveCheck(s, filename) {
     if (readConfig().detectMode !== 'live') return
     s._lastLiveEventAt = Date.now()
+    s._fallbackMs = 5000 // 事件驱动：兜底间隔复位
     s._liveEventCount++
     if (filename != null) {
       // 累积全部事件路径：AI 一次写多个文件/原子写 staging 刷屏时，
@@ -362,6 +369,10 @@ export function apply(ctx) {
   function queueLiveCheck(s) {
     s.scanChain = s.scanChain
       .then(() => doLiveCheck(s))
+      .then((changed) => {
+        // 有变更 → 间隔复位；连续无变更 → 指数退避（上限 80s），空闲工作区不空转全量扫描
+        s._fallbackMs = changed ? 5000 : Math.min((s._fallbackMs || 5000) * 2, 80000)
+      })
       .catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 实时检查失败', e) })
   }
   async function doLiveCheck(s) {
@@ -385,8 +396,10 @@ export function apply(ctx) {
         }
       }
       if (changed) s.rev++
+      return changed // 供 queueLiveCheck 调整静默兜底退避间隔
     } catch (e) {
       console.error('[dsh-diff-review] 实时检查失败', e)
+      return false
     }
   }
   // 文件级事件：只比对单个文件（绝大多数场景，避免全量 walk 成本）
@@ -549,8 +562,11 @@ export function apply(ctx) {
     return () => clearInterval(timer)
   })
 
-  async function scan(s, sessionId, turn) {
+  async function scan(s, sessionId, turn, opts) {
     if (!s.cwd) return
+    // trackMeta=false（调试扫描）：不推进 fileMeta 基线——否则调试扫描会把真实回合的
+    // 变更"偷走"（下一回合 scan 因基线已推进而无变更可记），且落组归属独立 sessionId
+    const trackMeta = !(opts && opts.trackMeta === false)
     s.scanning = true
     try {
       if (s.baseline) { try { await s.baseline } catch (e) {} }
@@ -624,7 +640,7 @@ export function apply(ctx) {
         }
         const nextMeta = new Map()
         for (const [p, info] of meta) nextMeta.set(p, info)
-        s.fileMeta = nextMeta
+        if (trackMeta) s.fileMeta = nextMeta
         for (const p of Array.from(s.contentCache.keys())) {
           if (!nextMeta.has(p)) s.contentCache.delete(p)
         }
@@ -932,19 +948,21 @@ export function apply(ctx) {
         const id = args && args.itemId
         // 实时预览项（id 前缀 live::）从 live 桶读取，正式项从 items 读取
         const item = id ? (id.indexOf('live::') === 0 ? s.live.get(id.slice(6)) : s.items.get(id)) : undefined
-        if (!item) return null
-        // 会话隔离：必须携带会话标识——缺省即拒绝（fail-closed）。
-        // 实时预览项是工作区级（sessionId='(live)'，不归属会话）：跳过归属匹配
-        // （否则 live 项展开 diff 时 getItem 永远返回 null，客户端卡在"加载 diff…"）；
-        // 正式项必须属于该会话（typert 恒注入 agent 会话；HTTP 通道不得退化为工作区级读取）
+        if (!item) {
+          // 返回错误对象而非 null：客户端可区分"记录不存在"与"加载中"（避免卡"加载 diff…"）
+          return { ok: false, error: 'not-found', message: '记录不存在（插件可能已重启）' }
+        }
+        // 会话标识必填（fail-closed）。操作范围 = 当前 agent 所在工作区（pickStore 已按会话定位
+        // 工作区 store）；store 内的正式/live 项均属该工作区，可读取（typert agent 不可伪造）。
         const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
-        if (!sid || (!item.live && item.sessionId !== sid)) return null
+        if (!sid) return { ok: false, error: 'no-store', message: '缺少会话标识，操作已拒绝' }
         return itemFull(item)
       }
       case 'review': {
         const s = pickStore(args)
         if (!s) return { ok: false, error: 'no-store', message: '尚无活跃工作区' }
-        // 会话隔离：必须携带会话标识且禁止操作其他会话的审阅项（fail-closed）
+        // 会话标识必填（fail-closed）。操作范围 = 当前 agent 所在工作区：store 内的正式/live 项
+        // 均属该工作区，允许操作（typert agent 不可伪造；跨工作区由 pickStore 隔离）
         const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
         if (!sid) return { ok: false, error: 'no-store', message: '缺少会话标识，操作已拒绝' }
         const item = args && args.itemId ? (args.itemId.indexOf('live::') === 0 ? s.live.get(args.itemId.slice(6)) : s.items.get(args.itemId)) : undefined
@@ -967,7 +985,6 @@ export function apply(ctx) {
           }
           return { ok: false, error: 'live-item', message: (item.originalMissing || item.gitOriginal) ? '原始内容未知，无法撤销' : '实时预览为只读（默认），可在 设置 → Diff 审阅插件 开启实时撤销' }
         }
-        if (item && item.sessionId !== sid) return { ok: false, error: 'no-store', message: '会话不匹配，操作已拒绝' }
         return reviewItem(s, args && args.itemId, args && args.action)
       }
       case 'reviewGroup': {
@@ -987,18 +1004,29 @@ export function apply(ctx) {
         return { ok: true, results }
       }
       case 'reviewSession': {
-        // 会话级全部保留：仅作用于该会话的待审阅项（dock 会话组内按钮）
+        // 会话级全部保留（dock 会话组内按钮）。目标会话 = request.targetSessionId（client 传，
+        // 须与当前 agent 同工作区）或缺省当前会话——修复 typert 迁移期"targetSessionId 被
+        // sessionId 覆盖"导致的静默错位（点 B 会话按钮实际保留 A 会话）。
         const s = pickStore(args)
         if (!s) return { ok: true, kept: 0 }
-        const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
+        const me = args && typeof args.sessionId === 'string' ? args.sessionId : ''
+        if (!me) return { ok: true, kept: 0 }
+        const target = args && typeof args.targetSessionId === 'string' && args.targetSessionId ? args.targetSessionId : me
+        // 目标会话必须已登记且与当前 agent 同一工作区（防跨工作区误操作）
+        const meSess = SESSIONS.get(me)
+        const tSess = SESSIONS.get(target)
+        if (!meSess || !tSess || tSess.cwd !== meSess.cwd) return { ok: false, error: 'no-store', message: '目标会话不属于当前工作区，操作已拒绝' }
         let n = 0
         for (const item of s.items.values()) {
-          if (item.sessionId === sid && item.status === 'pending') { item.status = 'kept'; n++ }
+          if (item.sessionId === target && item.status === 'pending') { item.status = 'kept'; n++ }
         }
         if (n > 0) s.rev++
         return { ok: true, kept: n }
       }
       case 'reviewAll': {
+        // 工作区级批量保留（dock 总栏按钮）：作用于当前 agent 工作区全部待审阅项。
+        // 注意这是有意的跨会话写路径（非破坏性——仅置 kept）；若未来添加"工作区全部撤销"
+        // 需重新评估破坏性跨会话写语义。
         const s = pickStore(args)
         if (!s) return { ok: true, kept: 0 }
         let n = 0
@@ -1056,11 +1084,10 @@ export function apply(ctx) {
     if (!s) return { ok: false, message: '尚无活跃工作区，无法打开' }
     const item = itemId ? (itemId.indexOf('live::') === 0 ? s.live.get(itemId.slice(6)) : s.items.get(itemId)) : undefined
     if (!item) return { ok: false, message: '记录不存在（插件可能已重启）' }
-    // 会话隔离（与 getItem/review 一致）：必须携带会话标识且禁止跨会话触发写临时原文 + 启动进程。
-    // 实时预览项是工作区级（不归属会话），跳过会话归属校验，但仍要求携带会话标识（防 HTTP 通道匿名）
+    // 会话标识必填（fail-closed）。操作范围 = 当前 agent 所在工作区（pickStore 已按会话定位
+    // 工作区 store）；store 内的正式/live 项均属该工作区，可触发外部打开（typert agent 不可伪造）
     const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
     if (!sid) return { ok: false, message: '缺少会话标识，操作已拒绝' }
-    if (!item.live && item.sessionId !== sid) return { ok: false, message: '会话不匹配，操作已拒绝' }
     if (!s.cwd) return { ok: false, message: '工作区尚未就绪' }
     try {
       let left = item.file
@@ -1289,7 +1316,9 @@ export function apply(ctx) {
             s.lastError = 'scan-throttled: 扫描过于频繁，请稍后再试'
           } else {
             s.lastToolScanAt = now
-            const chain = s.scanChain.then(() => scan(s, sessionId || 'debug', s.lastTurn + 1)).catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e) })
+            // 调试扫描：固定独立 sessionId（'drvw-scan'）+ 不推进基线（trackMeta=false），
+            // 避免把变更记入"未发生的第 N+1 回合"或偷走真实回合的变更
+            const chain = s.scanChain.then(() => scan(s, 'drvw-scan', 0, { trackMeta: false })).catch((e) => { s.lastError = ((e && e.message) || String(e)); console.error('[dsh-diff-review] 扫描失败', e) })
             s.scanChain = chain
             await chain
           }
@@ -1356,7 +1385,6 @@ export function apply(ctx) {
     const cwd = agent.session.header ? agent.session.header.cwd : null
     if (!sid || !cwd) return null
     const c = canonCwd(cwd)
-    const header = agent.session.header || {}
     const label = readSessionTitle(agent)
     const prevSess = SESSIONS.get(sid)
     SESSIONS.set(sid, {
@@ -1405,7 +1433,15 @@ export function apply(ctx) {
   // ---- v0.4 typert RPC transport（官方通信通道）----
   // agent 由运行时注入（scope.context='agent'）：方法内以 agent 会话为准，
   // client 传入的 sessionId 一律被 agent 覆盖——调用者身份不可伪造，天然会话绑定。
-  // reviewSession 同样只作用于当前 agent 会话（跨会话操作在 typert 边界下收紧）。
+  // 操作范围 = 当前 agent 所在工作区（pickStore 按会话定位工作区 store）。
+  // agentSessionId：typert 运行时注入的 agent 可能是 sessionId 字符串或 agent 对象
+  // （含 session.id），统一显式取值，避免依赖 String(agent) 的字符串化语义。
+  function agentSessionId(agent) {
+    if (agent == null) return ''
+    if (typeof agent === 'string') return agent
+    if (typeof agent === 'object' && agent.session && agent.session.id != null) return String(agent.session.id)
+    return String(agent)
+  }
   const typert = ctx.get('typert')
   if (typert && typeof typert.register === 'function') {
     class DiffReviewService extends TypertRemoteService {
@@ -1415,20 +1451,20 @@ export function apply(ctx) {
         // live 模式据此建立基线并启动 watcher，不依赖 agent/status 回合事件——
         // 否则重启后第一回合进行中实时预览不生效（store 直到回合结束才创建）
         registerSession(agent, null)
-        return handleAction('getState', Object.assign({}, request, { sessionId: String(agent) }))
+        return handleAction('getState', Object.assign({}, request, { sessionId: agentSessionId(agent) }))
       }
-      getItem(agent, request) { return handleAction('getItem', Object.assign({}, request, { sessionId: String(agent) })) }
-      review(agent, request) { return handleAction('review', Object.assign({}, request, { sessionId: String(agent) })) }
-      reviewGroup(agent, request) { return handleAction('reviewGroup', Object.assign({}, request, { sessionId: String(agent) })) }
-      reviewSession(agent, request) { return handleAction('reviewSession', Object.assign({}, request, { sessionId: String(agent) })) }
-      reviewAll(agent, request) { return handleAction('reviewAll', Object.assign({}, request, { sessionId: String(agent) })) }
-      openExternal(agent, request) { return handleAction('openExternal', Object.assign({}, request, { sessionId: String(agent) })) }
-      getEditorConfig(agent, request) { return handleAction('getEditorConfig', Object.assign({}, request, { sessionId: String(agent) })) }
-      saveEditorConfig(agent, request) { return handleAction('saveEditorConfig', Object.assign({}, request, { sessionId: String(agent) })) }
+      getItem(agent, request) { return handleAction('getItem', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      review(agent, request) { return handleAction('review', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      reviewGroup(agent, request) { return handleAction('reviewGroup', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      reviewSession(agent, request) { return handleAction('reviewSession', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      reviewAll(agent, request) { return handleAction('reviewAll', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      openExternal(agent, request) { return handleAction('openExternal', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      getEditorConfig(agent, request) { return handleAction('getEditorConfig', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
+      saveEditorConfig(agent, request) { return handleAction('saveEditorConfig', Object.assign({}, request, { sessionId: agentSessionId(agent) })) }
     }
     new DiffReviewService()
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.11.1），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.12.0），typert 唯一通道（无 HTTP 路由）')
 }
