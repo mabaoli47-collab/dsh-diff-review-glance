@@ -80,7 +80,7 @@ function apply(ctx) {
 
   // 初始 state 补全全部字段：首帧渲染（fetch 尚未返回）时不出现「未知工作区」误导文案，
   // 而是按"未识别"处理，等首次轮询返回后纠正
-  let state = { rev: 0, maxTurn: 0, workspaceId: null, workspaceLabel: '', sessionId: '', sessionKnown: false, loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], detectMode: 'turn', watcherActive: false, liveError: '' }
+  let state = { rev: 0, maxTurn: 0, workspaceId: null, workspaceLabel: '', sessionId: '', sessionKnown: false, loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], detectMode: 'turn', watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
   const subs = new Set()
   const detailCache = new Map()
   let fetching = false
@@ -132,7 +132,7 @@ function apply(ctx) {
             state = Object.assign({}, state, { hostError: 'old-host', sessionKnown: false, loading: false })
             emit()
           }
-        } else if (st.hostError !== state.hostError || !!st.sessionKnown !== !!state.sessionKnown || st.pendingCount !== state.pendingCount || (st.sessions || []).length !== (state.sessions || []).length || st.rev !== state.rev || !!st.loading !== !!state.loading || st.maxTurn !== state.maxTurn || st.workspaceId !== state.workspaceId || st.detectMode !== state.detectMode || !!st.watcherActive !== !!state.watcherActive || (st.liveError || '') !== (state.liveError || '')) {
+        } else if (st.hostError !== state.hostError || !!st.sessionKnown !== !!state.sessionKnown || st.pendingCount !== state.pendingCount || (st.sessions || []).length !== (state.sessions || []).length || st.rev !== state.rev || !!st.loading !== !!state.loading || st.maxTurn !== state.maxTurn || st.workspaceId !== state.workspaceId || st.detectMode !== state.detectMode || !!st.watcherActive !== !!state.watcherActive || (st.liveError || '') !== (state.liveError || '') || (st.liveStats && st.liveStats.events) !== (state.liveStats && state.liveStats.events) || (st.liveStats && st.liveStats.items) !== (state.liveStats && state.liveStats.items)) {
           state = st
           emit()
         }
@@ -516,11 +516,12 @@ function apply(ctx) {
     const liveItems = (snap && snap.live) || []
     // 实时模式状态提示（诊断 + 可观测）：watcher 失败原因 / 已开启
     const liveMode = !!(snap && snap.detectMode === 'live')
+    const liveStats = (snap && snap.liveStats) || { events: 0, checks: 0, items: 0 }
     const liveStatus = liveMode
       ? (snap && snap.liveError
           ? React.createElement('div', { className: 'dshdr-error' }, '实时预览不可用：' + snap.liveError)
           : snap && snap.watcherActive
-            ? React.createElement('div', { className: 'dshdr-note', style: { padding: '2px 10px 0' } }, '实时预览已开启（文件变化即时检测）')
+            ? React.createElement('div', { className: 'dshdr-note', style: { padding: '2px 10px 0' } }, '实时预览已开启（已收到 ' + liveStats.events + ' 次文件事件，' + liveStats.items + ' 项预览）')
             : React.createElement('div', { className: 'dshdr-note', style: { padding: '2px 10px 0' } }, '实时预览：等待工作区就绪…'))
       : null
     const liveBlock = liveItems.length > 0

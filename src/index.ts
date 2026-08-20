@@ -59,6 +59,13 @@ export function apply(ctx) {
       watchTimer: null, // 事件去抖定时器
       watchFailedAt: 0, // watcher 启动失败时间戳（30 秒后自动重试；0=无失败）
       watchError: '', // 最近一次 watcher 启动失败原因（getState 暴露给 UI）
+      liveTimer: null, // 定期兜底定时器（live 模式：事件静默时全量检查）
+      _livePendingPaths: null, // 去抖窗口内累积的待检查路径 Set（避免只查最后一个文件）
+      _liveFull: false, // 目录级/无文件名事件：需要全量兜底
+      _lastLiveEventAt: 0, // 最近一次 watcher 事件时间戳（判断事件是否静默）
+      _lastLiveCheckAt: 0, // 最近一次实时检查时间戳（兜底节流）
+      _liveEventCount: 0, // 已收到的事件计数（getState 暴露，便于诊断）
+      _liveCheckCount: 0, // 已执行的实时检查计数
       sessions: new Map(), // sessionId -> { lastTurn, label }：本工作区关联的会话（反向索引）
       lastTurn: 0,
       rev: 0,
@@ -274,6 +281,7 @@ export function apply(ctx) {
         s.watcher = w
         s.watchFailedAt = 0
         s.watchError = ''
+        ensureLiveFallbackTimer(s)
       } catch (e) {
         s.watchFailedAt = Date.now()
         s.watchError = (e && e.message) || String(e)
@@ -283,21 +291,59 @@ export function apply(ctx) {
       try { s.watcher.close() } catch (e) { /* 忽略 */ }
       s.watcher = null
     }
+    if (cfg.detectMode !== 'live' && s.liveTimer) {
+      clearInterval(s.liveTimer)
+      s.liveTimer = null
+    }
+  }
+  // 事件静默兜底：Windows fs.watch 事件可能丢失（或沙箱拦截 file watching），
+  // 若长时间没有事件到达，定期做一次全量版本对比保证不漏检。
+  // 只在 live 模式下运行；事件正常时（8 秒内有事件）自动跳过，几乎零开销。
+  function ensureLiveFallbackTimer(s) {
+    if (s.liveTimer || readConfig().detectMode !== 'live') return
+    s.liveTimer = setInterval(() => {
+      if (readConfig().detectMode !== 'live') return
+      const now = Date.now()
+      if (now - (s._lastLiveEventAt || 0) > 8000 && now - (s._lastLiveCheckAt || 0) > 4000) {
+        runLiveCheck(s)
+      }
+    }, 5000)
   }
   function scheduleLiveCheck(s, filename) {
     if (readConfig().detectMode !== 'live') return
-    // 保留最近一次事件的文件名：同批次改动以最后落盘的为准（多个事件取最后一个）
-    if (filename != null) s._livePending = filename
+    s._lastLiveEventAt = Date.now()
+    s._liveEventCount++
+    if (filename != null) {
+      // 累积全部事件路径：AI 一次写多个文件/原子写 staging 刷屏时，
+      // 不能只保留最后一个文件名（否则前面的变更全部丢失）
+      if (!s._livePendingPaths) s._livePendingPaths = new Set()
+      s._livePendingPaths.add(filename)
+    } else {
+      // 无文件名（目录级/未知事件）：标记需要全量兜底
+      s._liveFull = true
+    }
     if (s.watchTimer) clearTimeout(s.watchTimer)
     s.watchTimer = setTimeout(() => { s.watchTimer = null; runLiveCheck(s) }, 600)
   }
   async function runLiveCheck(s) {
     if (!s.cwd || readConfig().detectMode !== 'live') return
     if (s.baseline) { try { await s.baseline } catch (e) {} }
-    const pending = s._livePending
-    s._livePending = null
+    const paths = s._livePendingPaths
+    const full = s._liveFull
+    s._livePendingPaths = null
+    s._liveFull = false
+    s._lastLiveCheckAt = Date.now()
+    s._liveCheckCount++
     try {
-      const changed = pending ? await checkLiveFile(s, pending) : await checkLiveAll(s)
+      let changed = false
+      // 事件路径过多（≥30）或出现目录级事件时走全量，否则逐文件增量比对
+      if (full || !paths || paths.size >= 30) {
+        changed = await checkLiveAll(s)
+      } else {
+        for (const p of paths) {
+          if (await checkLiveFile(s, p)) changed = true
+        }
+      }
       if (changed) s.rev++
     } catch (e) {
       console.error('[dsh-diff-review] 实时检查失败', e)
@@ -305,7 +351,10 @@ export function apply(ctx) {
   }
   // 文件级事件：只比对单个文件（绝大多数场景，避免全量 walk 成本）
   async function checkLiveFile(s, rawPath) {
-    const joined = join(s.cwd, norm(rawPath))
+    // Windows recursive watch 的 filename 通常是相对路径（反斜杠），个别情况可能是绝对路径：
+    // 绝对路径（盘符或 / 开头）直接使用，相对路径拼接到工作区
+    const np = norm(rawPath)
+    const joined = /^[a-zA-Z]:\//.test(np) || posix.isAbsolute(np) ? np : join(s.cwd, np)
     let target
     try { target = await fs.resolve(joined) } catch (e) { return removeLivePath(s, rawPath) }
     if (!withinRoot(s.cwd, target.targetKey)) return false
@@ -400,10 +449,11 @@ export function apply(ctx) {
       degraded: false,
     }
   }
-  // watcher/去抖定时器随插件 fiber 卸载清理
+  // watcher/去抖定时器/兜底定时器随插件 fiber 卸载清理
   ctx.effect(() => () => {
     for (const st of STORES.values()) {
       if (st.watchTimer) { clearTimeout(st.watchTimer); st.watchTimer = null }
+      if (st.liveTimer) { clearInterval(st.liveTimer); st.liveTimer = null }
       if (st.watcher) { try { st.watcher.close() } catch (e) { /* 忽略 */ } st.watcher = null }
     }
   })
@@ -935,10 +985,11 @@ export function apply(ctx) {
     // 就绪（幂等）——不依赖 agent/status 回合事件，重启后首个 getState 即可启动实时监听
     if (s && cfg.detectMode === 'live') {
       syncLiveWatcher(s)
+      ensureLiveFallbackTimer(s)
       ensureBaseline(s)
     }
     if (!s) {
-      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], limits, detectMode: cfg.detectMode, watcherActive: false, liveError: '' }
+      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], limits, detectMode: cfg.detectMode, watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
     }
     const groups = []
     for (const g of s.groups.values()) {
@@ -1003,6 +1054,7 @@ export function apply(ctx) {
       detectMode: cfg.detectMode,
       watcherActive: !!s.watcher,
       liveError: s.watchError || '',
+      liveStats: { events: s._liveEventCount || 0, checks: s._liveCheckCount || 0, items: s.live.size },
       limits,
     }
   }
@@ -1346,5 +1398,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.5.1），typert 路由 + webServer 过渡路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.5.2），typert 路由 + webServer 过渡路由:', ROUTE)
 }
