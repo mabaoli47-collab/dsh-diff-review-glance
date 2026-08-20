@@ -58,6 +58,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 | `primeMaxChars` | 基线预读字符预算（单位 MB） | `48` |
 | `detectMode` | 检测模式：`turn`=回合结束刷新（默认，跨平台）；`live`=实时预览（fs.watch 监听，仅 Windows，非 Windows 自动回退 turn） | `turn` |
 | `liveRevert` | 实时预览项允许直接撤销（默认关闭；开启后 live 项显示撤销按钮，带版本冲突保护——进行中文件可能仍被 AI 改写，存在两个写者竞态，建议在 AI 停笔时撤销） | `false` |
+| `respectGitignore` | 尊重工作区根 `.gitignore`（默认开启：被忽略的文件不读入基线、不产生审阅项、不可撤销；关闭后恢复仅名单过滤） | `true` |
 
 配置写入 `~/.dsh/settings.yaml`（命名空间 `dsh-diff-review`）。数字项填 `0` 或非法值回退默认。
 
@@ -128,6 +129,7 @@ npm test        # vitest 单元测试（纯函数：路径/边界/敏感名单/d
 | v0.9.0 | **内存自动回收**：空闲工作区（10 分钟无活动）释放 fs.watch 句柄与定时器；`contentCache` 超 40000 条淘汰最旧；git 补读拒绝含 `$`/反引号的文件名（纵深防御） |
 | v0.10.0 | **健壮性**：实时检查挂入 scanChain 串行队列（不与回合扫描并发）；`removeLivePath` 改精确路径匹配（POSIX 大小写敏感）；外部 diff 临时文件 2 小时后自动清理；live 块 UI 标注「工作区级」 |
 | v0.11.0 | **敏感加强（.gitignore）**：工作区根 `.gitignore` 中忽略的文件不读入基线、不产生审阅项、不可撤销（纯函数匹配器 + 单测；仅支持根 `.gitignore`） |
+| v0.11.1 | `.gitignore` 排除改为设置项 **`respectGitignore`**（默认开启，可关闭） |
 
 ## 许可
 

@@ -143,8 +143,10 @@ export function apply(ctx) {
     const out = new Map()
     const seen = new Set()
     const stack = [{ path: root, depth: 0 }]
-    const maxFiles = readConfig().maxFiles // 可配置上限（settings → maxFiles）
-    const gitRules = await loadGitignoreFor(root) // 根 .gitignore（敏感加强）
+    const cfg0 = readConfig()
+    const maxFiles = cfg0.maxFiles // 可配置上限（settings → maxFiles）
+    // 根 .gitignore（敏感加强，设置 respectGitignore 可关闭）
+    const gitRules = cfg0.respectGitignore ? await loadGitignoreFor(root) : []
     let truncated = false
     while (stack.length > 0 && !truncated) {
       const cur = stack.pop()
@@ -398,8 +400,8 @@ export function apply(ctx) {
     if (!withinRoot(s.cwd, target.targetKey)) return false
     const realName = target.displayPath.split('/').pop() || ''
     if (isSensitiveFile(realName) || realPathBlocked(target.targetKey)) return false
-    // gitignore 加强：用户显式忽略的文件不进实时预览（已在 live 桶则移除）
-    if (gitignoreMatch(await loadGitignoreFor(s.cwd), relOf(target.displayPath, s), false)) {
+    // gitignore 加强：用户显式忽略的文件不进实时预览（已在 live 桶则移除）；设置可关闭
+    if (readConfig().respectGitignore && gitignoreMatch(await loadGitignoreFor(s.cwd), relOf(target.displayPath, s), false)) {
       s.live.delete(target.displayPath)
       return false
     }
@@ -724,6 +726,7 @@ export function apply(ctx) {
       primeMaxChars: { type: 'number' },
       detectMode: { type: 'string' },
       liveRevert: { type: 'boolean' },
+      respectGitignore: { type: 'boolean' },
     }
     function schema(input) {
       const src = input && typeof input === 'object' ? input : {}
@@ -753,6 +756,7 @@ export function apply(ctx) {
         primeMaxChars: { type: 'number', description: '基线预读字符预算，单位 MB（默认 48）' },
         detectMode: { type: 'string', description: '检测模式：turn=回合结束刷新（默认，跨平台）；live=实时预览（watcher 监听，仅 Windows）' },
         liveRevert: { type: 'boolean', description: '实时预览项允许直接撤销（默认关闭；开启后 live 项显示撤销按钮，带版本冲突保护）' },
+        respectGitignore: { type: 'boolean', description: '尊重工作区根 .gitignore（默认开启：被忽略的文件不读入基线、不产生审阅项、不可撤销）' },
       },
     })
     try {
@@ -765,7 +769,7 @@ export function apply(ctx) {
 
   // 读取插件配置（settings.yaml 命名空间 dsh-diff-review）；数字项 0/非法回退默认常量
   function readConfig() {
-    const empty = { code: '', devenv: '', vsDiffMerge: '', maxFiles: MAX_FILES, primeMaxFiles: PRIME_MAX_FILES, primeMaxChars: PRIME_MAX_CHARS, detectMode: 'turn', liveRevert: false }
+    const empty = { code: '', devenv: '', vsDiffMerge: '', maxFiles: MAX_FILES, primeMaxFiles: PRIME_MAX_FILES, primeMaxChars: PRIME_MAX_CHARS, detectMode: 'turn', liveRevert: false, respectGitignore: true }
     if (!settingsRegistered) return empty
     try {
       const v = settings.get(CONFIG_NS)
@@ -789,6 +793,8 @@ export function apply(ctx) {
         detectMode: v.detectMode === 'live' && isWin ? 'live' : 'turn',
         // 实时撤销默认关闭：进行中的文件可能仍被 AI 改写，撤销存在"两个写者"竞态，由用户显式开启
         liveRevert: v.liveRevert === true,
+        // 尊重 .gitignore 默认开启（敏感加强）；显式设为 false 才关闭
+        respectGitignore: v.respectGitignore !== false,
       }
     } catch (e) { return empty }
   }
@@ -1031,11 +1037,13 @@ export function apply(ctx) {
     patch.detectMode = dm
     // 实时撤销开关（默认关闭）
     patch.liveRevert = args.liveRevert === true
+    // 尊重 .gitignore 开关（默认开启；显式 false 才关闭）
+    patch.respectGitignore = args.respectGitignore !== false
     return Promise.resolve(settings.update(CONFIG_NS, patch))
       .then(() => {
         // 模式切换后同步各工作区 watcher 状态（live→启动，turn→关闭）；失败标记重置以便重试
         for (const st of STORES.values()) { st.watchFailedAt = 0; st.watchError = ''; syncLiveWatcher(st) }
-        return { ok: true, config: { code: patch.code, devenv: patch.devenv, vsDiffMerge: patch.vsDiffMerge, detectMode: patch.detectMode, liveRevert: patch.liveRevert } }
+        return { ok: true, config: { code: patch.code, devenv: patch.devenv, vsDiffMerge: patch.vsDiffMerge, detectMode: patch.detectMode, liveRevert: patch.liveRevert, respectGitignore: patch.respectGitignore } }
       })
       .catch((e) => ({ ok: false, message: (e && e.message) || String(e) }))
   }
@@ -1107,7 +1115,7 @@ export function apply(ctx) {
       ensureBaseline(s)
     }
     if (!s) {
-      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], limits, detectMode: cfg.detectMode, liveRevert: cfg.liveRevert, watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
+      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], limits, detectMode: cfg.detectMode, liveRevert: cfg.liveRevert, respectGitignore: cfg.respectGitignore, watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
     }
     const groups = []
     for (const g of s.groups.values()) {
@@ -1171,6 +1179,7 @@ export function apply(ctx) {
       live: Array.from(s.live.values()).map(itemSummary),
       detectMode: cfg.detectMode,
       liveRevert: cfg.liveRevert,
+      respectGitignore: cfg.respectGitignore,
       watcherActive: !!s.watcher,
       liveError: s.watchError || '',
       liveStats: { events: s._liveEventCount || 0, checks: s._liveCheckCount || 0, items: s.live.size },
@@ -1421,5 +1430,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.11.0），typert 唯一通道（无 HTTP 路由）')
+  console.log('[dsh-diff-review] 正式插件已启动（v0.11.1），typert 唯一通道（无 HTTP 路由）')
 }

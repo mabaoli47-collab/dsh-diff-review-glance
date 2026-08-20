@@ -58,6 +58,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 | `primeMaxChars` | Baseline character budget (in MB) | `48` |
 | `detectMode` | Detection mode: `turn`=scan at end of each turn (default, cross-platform); `live`=realtime preview (`fs.watch`, Windows only; non-Windows falls back to `turn`) | `turn` |
 | `liveRevert` | Allow reverting realtime preview items directly (off by default; when enabled live items show a revert button with version-conflict protection — in-progress files may still be rewritten by the AI, a two-writer race, so revert when the AI is not writing the file) | `false` |
+| `respectGitignore` | Respect the workspace-root `.gitignore` (on by default: ignored files are never read into the baseline, never turned into review items, never revertable; turning it off falls back to the name-list filter only) | `true` |
 
 Values are stored in `~/.dsh/settings.yaml` under the `dsh-diff-review` namespace. Numeric items fall back to the default when set to `0` or an invalid value.
 
@@ -128,6 +129,7 @@ npm test        # vitest unit tests (pure functions: path/boundary/sensitive-lis
 | v0.9.0 | **Automatic memory reclamation**: idle workspaces (10 min without activity) release their fs.watch handle and timers; `contentCache` evicts the oldest entries above 40000; git backfill refuses filenames containing `$`/backtick (defense in depth) |
 | v0.10.0 | **Robustness**: realtime checks join the scanChain serial queue (no concurrency with turn scans); `removeLivePath` uses exact path matching (POSIX case-sensitive); external-diff temp files are cleaned after 2h; the live block is labeled "workspace-level" in the UI |
 | v0.11.0 | **Sensitive hardening (`.gitignore`)**: files ignored by the workspace-root `.gitignore` are never read into the baseline, never turned into review items, never revertable (pure-function matcher with unit tests; root `.gitignore` only) |
+| v0.11.1 | `.gitignore` exclusion becomes the setting **`respectGitignore`** (on by default, can be turned off) |
 
 ## License
 
