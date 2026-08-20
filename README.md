@@ -43,11 +43,11 @@ DeepSeek Harness（dsh）Web 的**逐段对话文件修改审阅**插件：每�
 dsh plugin --profile web add github:mabaoli47-collab/dsh-diff-review
 ```
 
-### 通过 npm（发布后）
+### 通过 npm（尚未发布）
 
-```bash
-dsh plugin --profile web add dsh-diff-review@<version>
-```
+> 插件**尚未发布到 npm**，以下命令暂不可用（请使用上方 GitHub 或本地路径方式安装）：
+
+~~`dsh plugin --profile web add dsh-diff-review@<version>`~~
 
 ### 通过本地路径
 

@@ -43,11 +43,11 @@ Current version: v0.16.4
 dsh plugin --profile web add github:mabaoli47-collab/dsh-diff-review
 ```
 
-### From npm (once published)
+### From npm (not yet published)
 
-```bash
-dsh plugin --profile web add dsh-diff-review@<version>
-```
+> The plugin is **not yet published to npm**; the command below is not available yet (use the GitHub or local-path route above instead):
+
+~~`dsh plugin --profile web add dsh-diff-review@<version>`~~
 
 ### From a local path
 
