@@ -1,4 +1,4 @@
-# dsh-diff-review
+# dsh-diff-review-glance
 
 Per-turn **file-change diff review** for DeepSeek Harness (dsh) Web. After each conversation turn, the plugin scans the workspace for files that were **modified in place** (new/deleted files are ignored), builds a VS Code-style two-pane diff, and lets you **keep / revert / redo** each change.
 
@@ -57,7 +57,7 @@ git clone <repo-url> %TEMP%\dsh-diff-review
 dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 ```
 
-**Restart dsh after installing** — a running instance keeps its old composition until restarted. After upgrading the plugin, **hard-refresh the browser (Ctrl+F5) or use an incognito window** — the browser may cache the old client bundle, and a stale client can fail to reach the new host (shows "cannot connect to plugin host").
+**Restart dsh after installing** — a running instance keeps its old composition until restarted.
 
 ## Usage
 
