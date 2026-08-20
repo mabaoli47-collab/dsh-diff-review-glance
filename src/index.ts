@@ -833,11 +833,12 @@ export function apply(ctx) {
         // 实时预览项（id 前缀 live::）从 live 桶读取，正式项从 items 读取
         const item = id ? (id.indexOf('live::') === 0 ? s.live.get(id.slice(6)) : s.items.get(id)) : undefined
         if (!item) return null
-        // 会话隔离：必须携带会话标识且 item 属于该会话——缺省即拒绝（fail-closed）。
-        // typert 通道恒注入 agent 会话（不可省略）；HTTP 过渡通道缺省时不得退化为
-        // 工作区级访问（否则可按 itemId 读取任意会话的 diff 内容）
+        // 会话隔离：必须携带会话标识——缺省即拒绝（fail-closed）。
+        // 实时预览项是工作区级（sessionId='(live)'，不归属会话）：跳过归属匹配
+        // （否则 live 项展开 diff 时 getItem 永远返回 null，客户端卡在"加载 diff…"）；
+        // 正式项必须属于该会话（typert 恒注入 agent 会话；HTTP 通道不得退化为工作区级读取）
         const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
-        if (!sid || item.sessionId !== sid) return null
+        if (!sid || (!item.live && item.sessionId !== sid)) return null
         return itemFull(item)
       }
       case 'review': {
@@ -1416,5 +1417,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.6.0），typert 路由 + webServer 过渡路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.6.1），typert 路由 + webServer 过渡路由:', ROUTE)
 }
