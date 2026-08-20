@@ -80,7 +80,7 @@ function apply(ctx) {
 
   // 初始 state 补全全部字段：首帧渲染（fetch 尚未返回）时不出现「未知工作区」误导文案，
   // 而是按"未识别"处理，等首次轮询返回后纠正
-  let state = { rev: 0, maxTurn: 0, workspaceId: null, workspaceLabel: '', sessionId: '', sessionKnown: false, loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], detectMode: 'turn', watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
+  let state = { rev: 0, maxTurn: 0, workspaceId: null, workspaceLabel: '', sessionId: '', sessionKnown: false, loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], detectMode: 'turn', liveRevert: false, watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
   const subs = new Set()
   const detailCache = new Map()
   let fetching = false
@@ -132,7 +132,7 @@ function apply(ctx) {
             state = Object.assign({}, state, { hostError: 'old-host', sessionKnown: false, loading: false })
             emit()
           }
-        } else if (st.hostError !== state.hostError || !!st.sessionKnown !== !!state.sessionKnown || st.pendingCount !== state.pendingCount || (st.sessions || []).length !== (state.sessions || []).length || st.rev !== state.rev || !!st.loading !== !!state.loading || st.maxTurn !== state.maxTurn || st.workspaceId !== state.workspaceId || st.detectMode !== state.detectMode || !!st.watcherActive !== !!state.watcherActive || (st.liveError || '') !== (state.liveError || '') || (st.liveStats && st.liveStats.events) !== (state.liveStats && state.liveStats.events) || (st.liveStats && st.liveStats.items) !== (state.liveStats && state.liveStats.items)) {
+        } else if (st.hostError !== state.hostError || !!st.sessionKnown !== !!state.sessionKnown || st.pendingCount !== state.pendingCount || (st.sessions || []).length !== (state.sessions || []).length || st.rev !== state.rev || !!st.loading !== !!state.loading || st.maxTurn !== state.maxTurn || st.workspaceId !== state.workspaceId || st.detectMode !== state.detectMode || !!st.liveRevert !== !!state.liveRevert || !!st.watcherActive !== !!state.watcherActive || (st.liveError || '') !== (state.liveError || '') || (st.liveStats && st.liveStats.events) !== (state.liveStats && state.liveStats.events) || (st.liveStats && st.liveStats.items) !== (state.liveStats && state.liveStats.items)) {
           state = st
           emit()
         }
@@ -260,6 +260,7 @@ function apply(ctx) {
     '.dshdr-cfg .dshdr-cfg-desc { margin: 0; font-size: 12px; color: rgba(128,128,128,0.9); }\n' +
     '.dshdr-cfg-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }\n' +
     '.dshdr-cfg-field input { padding: 6px 8px; border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; background: rgba(128,128,128,0.08); color: inherit; font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }\n' +
+    '.dshdr-cfg-field input[type="checkbox"] { width: 16px; height: 16px; padding: 0; border: none; border-radius: 0; background: none; accent-color: #2ea043; }\n' +
     '.dshdr-cfg-field input:focus { outline: none; border-color: rgba(46,160,67,0.6); }\n' +
     '.dshdr-cfg-field select { padding: 6px 8px; min-height: 32px; width: 100%; box-sizing: border-box; border: 1px solid rgba(128,128,128,0.4); border-radius: 6px; background: rgba(128,128,128,0.08); color: inherit; font-size: 13px; }\n' +
     '.dshdr-cfg-field select option { background: #1f2328; color: inherit; }\n' +
@@ -383,10 +384,11 @@ function apply(ctx) {
           pane(left, 'left'),
           pane(right, 'right'))))
   }
-  function actionsFor(item) {
-    // 实时预览项：进行中即可直接撤销（带版本冲突保护）；保留无意义（回合结束自动成为正式项）
+  function actionsFor(item, liveRevert) {
+    // 实时预览项：默认只读；仅当设置开启实时撤销（liveRevert）时才显示撤销按钮
+    // （保留无意义——回合结束自动成为正式项）
     if (item.live) {
-      if (item.originalMissing || item.gitOriginal) return []
+      if (!liveRevert || item.originalMissing || item.gitOriginal) return []
       return item.status === 'pending' ? [['revert', '撤销']] : []
     }
     // gitOriginal：原文来自 git HEAD 非会话基线，撤销会回退到 HEAD 吞掉未提交工作——仅允许保留
@@ -430,7 +432,7 @@ function apply(ctx) {
       } catch (e) { setError('调用失败') }
       setBusy(false)
     }
-    const acts = actionsFor(item)
+    const acts = actionsFor(item, !!(getSnapshot() && getSnapshot().liveRevert))
     const head = React.createElement('div', { className: 'dshdr-item-head', onClick: toggle },
       React.createElement('span', { className: 'dshdr-path' }, item.relPath),
       showTurn ? React.createElement('span', { className: 'dshdr-turn-tag' }, '第 ' + item.turn + ' 段') : null,
@@ -586,7 +588,7 @@ function apply(ctx) {
   }
 
   function EditorSettingsView() {
-    const [cfg, setCfg] = React.useState({ code: '', devenv: '', vsDiffMerge: '', maxFiles: 0, primeMaxFiles: 0, primeMaxChars: 0, detectMode: 'turn' })
+    const [cfg, setCfg] = React.useState({ code: '', devenv: '', vsDiffMerge: '', maxFiles: 0, primeMaxFiles: 0, primeMaxChars: 0, detectMode: 'turn', liveRevert: false })
     const [status, setStatus] = React.useState(null)
     React.useEffect(() => {
       let alive = true
@@ -596,6 +598,7 @@ function apply(ctx) {
             code: c.code || '', devenv: c.devenv || '', vsDiffMerge: c.vsDiffMerge || '',
             maxFiles: c.maxFiles || 0, primeMaxFiles: c.primeMaxFiles || 0, primeMaxChars: c.primeMaxChars ? c.primeMaxChars / (1024 * 1024) : 0,
             detectMode: c.detectMode === 'live' ? 'live' : 'turn',
+            liveRevert: !!c.liveRevert,
           })
         }
       }).catch(() => {})
@@ -607,6 +610,7 @@ function apply(ctx) {
           code: cfg.code, devenv: cfg.devenv, vsDiffMerge: cfg.vsDiffMerge,
           maxFiles: cfg.maxFiles, primeMaxFiles: cfg.primeMaxFiles, primeMaxChars: cfg.primeMaxChars,
           detectMode: cfg.detectMode,
+          liveRevert: cfg.liveRevert,
         })
         setStatus(r && r.ok === true ? { ok: true, message: '已保存（标准 settings 注册，写入 settings.yaml）' } : { ok: false, message: (r && r.message) || '保存失败' })
       } catch (e) { setStatus({ ok: false, message: '保存失败' }) }
@@ -625,6 +629,9 @@ function apply(ctx) {
         React.createElement('select', { value: cfg.detectMode, onChange: (e) => setCfg({ ...cfg, detectMode: e.target.value }) },
           React.createElement('option', { value: 'turn' }, '回合结束（默认）'),
           React.createElement('option', { value: 'live' }, '实时预览（仅 Windows）'))),
+      React.createElement('label', { className: 'dshdr-cfg-field', key: 'liveRevert' },
+        React.createElement('span', null, '实时预览允许撤销（默认关闭）'),
+        React.createElement('input', { type: 'checkbox', checked: cfg.liveRevert, onChange: (e) => setCfg({ ...cfg, liveRevert: e.target.checked }) })),
       React.createElement('h3', null, '外部编辑器路径（留空自动探测）'),
       React.createElement('p', { className: 'dshdr-cfg-desc' }, '通过标准 settings 注册（命名空间 dsh-diff-review），保存后由 settings 服务写入 settings.yaml。配置优先；留空自动探测。'),
       field('code', 'VS Code（code 或 Code.exe 路径）', '如 C:\\Program Files\\Microsoft VS Code\\Code.exe'),

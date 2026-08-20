@@ -8,7 +8,7 @@ Per-turn **file-change diff review** for DeepSeek Harness (dsh) Web. After each 
 
 - **Multi-workspace, multi-baseline**: each workspace gets its own baseline and change tracking; switching workspaces never cross-contaminates state (same file names or turn numbers do not collide).
 - **Detects every modification source**: end-of-turn full version diff catches changes made by bash, editors, or write tools alike.
-- **Optional realtime preview (v0.5)**: the detection mode can be switched between "end of turn" and "realtime preview" — realtime mode watches the workspace with `fs.watch` (Windows only) and shows an "in-progress changes" preview while the conversation is running; you can expand the diff, **revert (with version-conflict protection) or open it externally right away**; it is folded into the formal review items when the turn ends (avoiding intermediate write states).
+- **Optional realtime preview (v0.5)**: the detection mode can be switched between "end of turn" and "realtime preview" — realtime mode watches the workspace with `fs.watch` (Windows only) and shows an "in-progress changes" preview while the conversation is running; you can expand the diff or open it externally right away; **realtime revert is off by default** and can be enabled in Settings (with version-conflict protection); it is folded into the formal review items when the turn ends (avoiding intermediate write states).
 - **Always-visible review dock**: the "pending changes" bar sits above the composer even with zero changes (empty state), and shows progress while scanning.
 - **Two-level grouping (workspace → session)**: the dock expands into per-session groups with the source turn tagged ("turn N"); multiple sessions in one workspace never cross-contaminate — a turn number is only unique within its session.
 - **Real session titles**: session groups show the dsh conversation title (read from the `session/title` log event); before a title exists they fall back to a short session id (e.g. `#356424b9`).
@@ -42,7 +42,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 2. After a turn finishes:
    - A "pending changes" dock appears above the composer (click to expand → workspace header + per-session groups; the bar offers "keep all in workspace", each session group offers "keep all in session").
    - A "file changes in turn N" panel appears at the tail of that turn (click to expand).
-3. Optional: switch the detection mode to "realtime preview" in Settings → Diff Review Plugin; while a conversation is running you then see an "in-progress changes (realtime preview)" block at the top of the dock (Windows only) — expand the diff, revert (with version-conflict protection) or open externally right away, no need to wait for the turn to end.
+3. Optional: switch the detection mode to "realtime preview" in Settings → Diff Review Plugin; while a conversation is running you then see an "in-progress changes (realtime preview)" block at the top of the dock (Windows only) — expand the diff or open it externally right away; for in-conversation revert, tick "allow realtime revert" (off by default).
 4. Click a file to expand its diff (toggle "changed lines only").
 5. Keep or revert each change; "Open with..." opens the file or a diff in VS Code / VS2022, or reveals it in the file explorer / Finder.
 
@@ -57,6 +57,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 | `primeMaxFiles` | Max files pre-read into the baseline cache | `6000` |
 | `primeMaxChars` | Baseline character budget (in MB) | `48` |
 | `detectMode` | Detection mode: `turn`=scan at end of each turn (default, cross-platform); `live`=realtime preview (`fs.watch`, Windows only; non-Windows falls back to `turn`) | `turn` |
+| `liveRevert` | Allow reverting realtime preview items directly (off by default; when enabled live items show a revert button with version-conflict protection — in-progress files may still be rewritten by the AI, a two-writer race, so revert when the AI is not writing the file) | `false` |
 
 Values are stored in `~/.dsh/settings.yaml` under the `dsh-diff-review` namespace. Numeric items fall back to the default when set to `0` or an invalid value.
 

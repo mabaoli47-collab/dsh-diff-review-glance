@@ -637,6 +637,7 @@ export function apply(ctx) {
       primeMaxFiles: { type: 'number' },
       primeMaxChars: { type: 'number' },
       detectMode: { type: 'string' },
+      liveRevert: { type: 'boolean' },
     }
     function schema(input) {
       const src = input && typeof input === 'object' ? input : {}
@@ -645,6 +646,8 @@ export function apply(ctx) {
         if (dict[key].type === 'number') {
           const v = src[key]
           out[key] = typeof v === 'number' ? v : (typeof v === 'string' && v.trim() !== '' ? Number(v) : 0)
+        } else if (dict[key].type === 'boolean') {
+          out[key] = !!src[key]
         } else {
           out[key] = typeof src[key] === 'string' ? src[key] : ''
         }
@@ -663,6 +666,7 @@ export function apply(ctx) {
         primeMaxFiles: { type: 'number', description: '基线预读文件数上限（默认 6000）' },
         primeMaxChars: { type: 'number', description: '基线预读字符预算，单位 MB（默认 48）' },
         detectMode: { type: 'string', description: '检测模式：turn=回合结束刷新（默认，跨平台）；live=实时预览（watcher 监听，仅 Windows）' },
+        liveRevert: { type: 'boolean', description: '实时预览项允许直接撤销（默认关闭；开启后 live 项显示撤销按钮，带版本冲突保护）' },
       },
     })
     try {
@@ -675,7 +679,7 @@ export function apply(ctx) {
 
   // 读取插件配置（settings.yaml 命名空间 dsh-diff-review）；数字项 0/非法回退默认常量
   function readConfig() {
-    const empty = { code: '', devenv: '', vsDiffMerge: '', maxFiles: MAX_FILES, primeMaxFiles: PRIME_MAX_FILES, primeMaxChars: PRIME_MAX_CHARS, detectMode: 'turn' }
+    const empty = { code: '', devenv: '', vsDiffMerge: '', maxFiles: MAX_FILES, primeMaxFiles: PRIME_MAX_FILES, primeMaxChars: PRIME_MAX_CHARS, detectMode: 'turn', liveRevert: false }
     if (!settingsRegistered) return empty
     try {
       const v = settings.get(CONFIG_NS)
@@ -697,6 +701,8 @@ export function apply(ctx) {
         // 配置以 MB 为单位，内部转为字符数；硬上限 1024MB
         primeMaxChars: num(v.primeMaxChars, PRIME_MAX_CHARS / (1024 * 1024), 1024) * (1024 * 1024),
         detectMode: v.detectMode === 'live' && isWin ? 'live' : 'turn',
+        // 实时撤销默认关闭：进行中的文件可能仍被 AI 改写，撤销存在"两个写者"竞态，由用户显式开启
+        liveRevert: v.liveRevert === true,
       }
     } catch (e) { return empty }
   }
@@ -849,13 +855,15 @@ export function apply(ctx) {
         if (!sid) return { ok: false, error: 'no-store', message: '缺少会话标识，操作已拒绝' }
         const item = args && args.itemId ? (args.itemId.indexOf('live::') === 0 ? s.live.get(args.itemId.slice(6)) : s.items.get(args.itemId)) : undefined
         if (item && item.live) {
-          // 实时预览项：进行中即可直接撤销（无需等回合结束）。
-          // 安全护栏：① 走 applyFileWrite 版本冲突检测——AI 在你撤销后已改过文件则拒绝，不静默破坏；
+          // 实时预览项：默认只读（只读模式更安全——进行中的文件可能仍被 AI 改写，两个写者竞态）。
+          // liveRevert=true 时允许直接撤销，安全护栏：
+          // ① 走 applyFileWrite 版本冲突检测——AI 在你撤销后已改过文件则拒绝，不静默破坏；
           // ② 原始内容未知（originalMissing/gitOriginal）不可撤销；③ 撤销成功后该项冻结
           // （liveCompare 跳过已撤销项，不再被实时刷新覆盖），文件恢复为会话基线后，
           // 回合扫描会因 original===current 天然跳过，不会重复产生正式审阅项。
           // 「保留」在 live 阶段无意义（回合结束自动成为正式项），不提供。
-          if (args && args.action === 'revert' && !item.originalMissing && !item.gitOriginal) {
+          const cfg = readConfig()
+          if (cfg.liveRevert && args && args.action === 'revert' && !item.originalMissing && !item.gitOriginal) {
             const res = await applyFileWrite(s, item.file, item.original, item.modified)
             if (!res.ok) return res
             item.status = 'reverted'
@@ -863,7 +871,7 @@ export function apply(ctx) {
             s.rev++
             return { ok: true, status: item.status }
           }
-          return { ok: false, error: 'live-item', message: (item.originalMissing || item.gitOriginal) ? '原始内容未知，无法撤销' : '进行中的修改预览仅支持撤销' }
+          return { ok: false, error: 'live-item', message: (item.originalMissing || item.gitOriginal) ? '原始内容未知，无法撤销' : '实时预览为只读（默认），可在 设置 → Diff 审阅插件 开启实时撤销' }
         }
         if (item && item.sessionId !== sid) return { ok: false, error: 'no-store', message: '会话不匹配，操作已拒绝' }
         return reviewItem(s, args && args.itemId, args && args.action)
@@ -933,11 +941,13 @@ export function apply(ctx) {
     const dm = typeof args.detectMode === 'string' ? args.detectMode : ''
     if (dm !== 'turn' && dm !== 'live') return { ok: false, message: 'detectMode 仅支持 turn / live' }
     patch.detectMode = dm
+    // 实时撤销开关（默认关闭）
+    patch.liveRevert = args.liveRevert === true
     return Promise.resolve(settings.update(CONFIG_NS, patch))
       .then(() => {
         // 模式切换后同步各工作区 watcher 状态（live→启动，turn→关闭）；失败标记重置以便重试
         for (const st of STORES.values()) { st.watchFailedAt = 0; st.watchError = ''; syncLiveWatcher(st) }
-        return { ok: true, config: { code: patch.code, devenv: patch.devenv, vsDiffMerge: patch.vsDiffMerge, detectMode: patch.detectMode } }
+        return { ok: true, config: { code: patch.code, devenv: patch.devenv, vsDiffMerge: patch.vsDiffMerge, detectMode: patch.detectMode, liveRevert: patch.liveRevert } }
       })
       .catch((e) => ({ ok: false, message: (e && e.message) || String(e) }))
   }
@@ -1008,7 +1018,7 @@ export function apply(ctx) {
       ensureBaseline(s)
     }
     if (!s) {
-      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], limits, detectMode: cfg.detectMode, watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
+      return { rev: 0, maxTurn: 0, workspaceId: '', workspaceLabel: '', sessionId: curSessionId, sessionKnown: !!curSessionId && SESSIONS.has(curSessionId), loading: false, truncated: false, lastTurn: 0, pendingCount: 0, sessions: [], groups: [], pending: [], live: [], limits, detectMode: cfg.detectMode, liveRevert: cfg.liveRevert, watcherActive: false, liveError: '', liveStats: { events: 0, checks: 0, items: 0 } }
     }
     const groups = []
     for (const g of s.groups.values()) {
@@ -1071,6 +1081,7 @@ export function apply(ctx) {
       pending,
       live: Array.from(s.live.values()).map(itemSummary),
       detectMode: cfg.detectMode,
+      liveRevert: cfg.liveRevert,
       watcherActive: !!s.watcher,
       liveError: s.watchError || '',
       liveStats: { events: s._liveEventCount || 0, checks: s._liveCheckCount || 0, items: s.live.size },
@@ -1417,5 +1428,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.6.1），typert 路由 + webServer 过渡路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.7.0），typert 路由 + webServer 过渡路由:', ROUTE)
 }
