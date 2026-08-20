@@ -3,7 +3,7 @@
 import { posix } from 'node:path'
 
 /** 忽略目录：node_modules/.git/凭据目录等；walkWorkspace 与 realPathBlocked 共用 */
-export const IGNORE_DIRS = new Set(['node_modules', '.git', '.hg', '.svn', '.next', '.nuxt', '.venv', 'venv', '__pycache__', '.cache', '.turbo', 'dist', 'build', 'out', 'coverage', 'target', '.idea', '.vscode', '.pytest_cache', '.mypy_cache', '.dsh-dr-tmp-orig', '.ssh', '.aws', '.gnupg', '.kube', '.docker', '.azure'])
+export const IGNORE_DIRS = new Set(['node_modules', '.git', '.hg', '.svn', '.next', '.nuxt', '.venv', 'venv', '__pycache__', '.cache', '.turbo', 'dist', 'build', 'out', 'coverage', 'target', '.idea', '.vscode', '.pytest_cache', '.mypy_cache', '.dsh-dr-tmp-orig', '.ssh', '.aws', '.gnupg', '.kube', '.docker', '.azure', '.pnpm-store'])
 
 /** diff 上下文行数与 LCS 单元格上限（computeDiff 使用） */
 export const CONTEXT = 3
