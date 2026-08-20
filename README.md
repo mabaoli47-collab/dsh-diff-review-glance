@@ -12,9 +12,9 @@ DeepSeek Harness（dsh）Web 的**逐段对话文件修改审阅**插件：每�
 - **两级分组（工作区 → 会话）**：dock 展开后先按会话分组，会话组内各项标注来源回合（第 N 段）；同一工作区下的多个会话、同号轮次互不混淆（轮次仅会话内唯一）
 - **会话真实标题**：会话组显示 dsh 会话标题（取自会话日志 `session/title` 事件），标题未生成时回退为会话短 id（如 `#356424b9`）
 - **回合尾部面板**：每段对话结束处显示「第 N 段对话的文件修改」，默认折叠、点击展开（严格归属当前会话）
-- **diff 查看**：LCS 行级 diff + 字符级高亮，支持「只显示改动行」（未改动行折叠为计数）
+- **diff 查看**：LCS 行级 diff + 字符级高亮，支持「只显示改动行」（未改动行折叠为计数）；**左右两栏布局**，原内容 / 修改后两栏各带横向滚动条，便于阅览长行
 - **审阅操作**：逐项或按段「全部保留 / 全部撤销」，撤销后支持「重做」
-- **外部编辑器打开**：「其他打开方式」→ VS Code / VS2022 打开或 Diff（临时原文件自动写入工作区）
+- **外部打开**：「其他打开方式」→ VS Code / VS2022 打开或 Diff（临时原文件自动写入工作区），以及**在文件资源管理器中显示**（Windows `explorer /select,` / macOS `open -R` / Linux `xdg-open`）
 - **标准 settings 配置**：外部编辑器路径通过 settings.yaml 配置，留空自动探测
 
 ## 安装
@@ -42,7 +42,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
    - 输入框上方出现「待审阅修改」dock（点击展开 → 工作区头部 + 按会话分组；总栏「工作区全部保留」，会话组内「本会话全部保留」）
    - 每段对话尾部出现「第 N 段对话的文件修改」面板（点击展开 → 各文件项）
 3. 点击文件项展开 diff（可切换「只显示改动行」）
-4. 执行「保留」或「撤销」；「其他打开方式」可在 VS Code / VS2022 中打开文件或 diff
+4. 执行「保留」或「撤销」；「其他打开方式」可在 VS Code / VS2022 中打开文件或 diff，或在文件资源管理器 / 访达中定位文件
 
 ## 配置（设置 → Diff 审阅插件）
 
@@ -62,7 +62,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 - **多基线 + 会话层**：`STORES: Map<cwd, store>` 每个工作区独立状态桶（基线 / 版本快照 / 内容缓存 / 分组 / 待审阅项）；`SESSIONS: Map<sessionId, {cwd, lastTurn, label}>` 会话注册表；轮次键为 `sessionId::turn`，审阅项 id 为 `sessionId::turn::path`（同一工作区多会话、同号轮次互不冲突）
 - **检测时机**：`agent/turn-stopping`（回合结束）触发全量 `walkWorkspace` 版本对比
 - **仅跟踪修改**：新文件只缓存不产生审阅项（符合「仅包括修改」）；文件版本变化才生成 diff
-- **通信**：host 通过 `webServer` 路由暴露 JSON API，client 用 `fetch` 调用；客户端从 slot standard props 取 `sessionId`，宿主经 `sessionId → cwd` 映射定位工作区桶（纯 GUI 切换工作区也能刷新）；刷新页面后会话标识重新注入即自动恢复识别，不丢失工作区
+- **通信（v0.4 起）**：host 通过**官方 typert RPC**（`dsh-typert-protocol`）暴露服务——调用方 `agent` 由运行时注入，**会话绑定不可伪造**，无 HTTP 攻击面；client 经 `ctx.remote` 挂载描述符后调用命名空间方法。`webServer` HTTP 路由保留为**过渡回退**，迁移验证完成后移除。
 
 ## 权限说明
 
@@ -70,19 +70,19 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 
 - **读取当前工作区文件内容**：为建立文件版本基线并检测修改，插件会遍历并预读工作区文本（默认排除 `.env*`、`*.pem` / `*.key` / `*.p12` / `*.pfx` / `*.crt` / `*.keystore`、`credentials.*`、`secrets.*`、`config.local.*`、SSH 私钥（`id_rsa`/`id_ed25519` 等无扩展名）、`.netrc` / `.npmrc` / `.git-credentials` / `.pgpass` / `htpasswd`，以及 `.ssh/` `.aws/` `.gnupg/` `.kube/` 目录——**best-effort 名单，非安全保证**）；
 - **写回工作区文件**：「撤销 / 重做」会把文件恢复为审阅前的版本（带版本冲突检测——文件被外部修改时会拒绝写回而非覆盖）；
-- **启动外部进程**：「其他打开方式」会以完整沙箱访问（`danger-full-access`）启动**你配置**的编辑器（VS Code / VS2022）——仅在你主动点击时发生；
-- **本地 HTTP API**：`/dsh-diff-review` 的信任边界是**宿主的监听地址**（默认仅 `127.0.0.1` 回环）；写操作校验请求来源（防浏览器 CSRF 与 DNS 重绑定），所有请求校验 Host。**若你把 dsh 的 webServer 绑定到非回环地址（`0.0.0.0` 等），本插件的本地 API 将同样暴露——请自行评估风险**。
+- **启动外部进程**：「其他打开方式」会以完整沙箱访问（`danger-full-access`）启动**你配置**的编辑器（VS Code / VS2022）或资源管理器（`explorer.exe` / `open -R` / `xdg-open`）——仅在你主动点击时发生；
+- **通信（v0.4）**：host/client 走官方 **typert RPC**（`dsh-typert-protocol`，agent 由运行时注入，天然会话绑定，无 HTTP 攻击面）。`webServer` HTTP 路由为**过渡保留**（client 在 typert 未就绪时回退 fetch）——过渡期内其信任边界是宿主的监听地址（默认 `127.0.0.1` 回环），迁移完成后该路由删除。
 
 **威胁模型**：插件的信任边界 = 本机回环 + 宿主监听地址。插件**不会**将任何数据上传网络——所有通信均为浏览器 ↔ 本机宿主之间的本地请求。
 
 ## 风险声明
 
-本插件已做路径边界、请求来源（CSRF/DNS 重绑定）、Host 白名单、命令注入、TOCTOU/版本冲突等防护，但以下**残余风险与条件性风险**需明确知悉：
+本插件已做路径边界、请求来源（CSRF/DNS 重绑定，**过渡期 HTTP 路由**）、Host 白名单（过渡期）、命令注入、TOCTOU/版本冲突等防护，但以下**残余风险与条件性风险**需明确知悉：
 
 - **敏感文件过滤是 best-effort，非安全保证**：默认排除名单基于文件名/后缀匹配；无标准后缀的密钥（如直接命名为 `secret` / `token`）、压缩/编码后的凭据文件（如 `id_rsa.zip`、`cert.base64`）不会命中，可能被读入基线缓存并展示 diff。**请勿在包含此类文件的工作区中使用本插件，或将敏感文件置于忽略范围之外**。
 - **撤销/重做的 TOCTOU 窗口**：`applyFileWrite` 在路径校验与写入之间存在极短时间窗口；若本地恶意进程恰好在窗口内把目标文件替换为指向工作区外的符号链接，写入可能越界。此威胁源（本地恶意进程）本身已具备文件系统权限，插件无法完全防范。
 - **临时文件权限**：`dsh-dr-tmp-orig-*` 临时文件在 Windows 上受 `%TEMP%` 用户目录（NTFS ACL）隔离保护；但 `chmod 600` 在 Windows/网络文件系统上不保证生效，共享机器或 SMB/NFS 挂载的临时目录下，其他用户可能读取这些包含源代码的临时文件。编辑器打开期间文件保留在磁盘，由 OS 定期清理。
-- **宿主绑定非回环地址时**：若将 dsh 的 `webServer` 绑定到 `0.0.0.0` 或局域网地址，本插件的本地 API（含读取接口）将随宿主一并暴露于网络。插件无法约束宿主监听地址，**请勿将 dsh 暴露到不可信网络**。
+- **过渡期 HTTP 路由**：`webServer` 路由在 typert 迁移完成前保留。过渡期内若将 dsh 的 `webServer` 绑定到非回环地址（`0.0.0.0` 等），该路由的 API 会随宿主暴露——请勿将 dsh 暴露到不可信网络。**迁移完成后此路由（及 CSRF/DNS 重绑定/Host/Origin 等配套防护）将整体删除，攻击面清零**。
 - **调试工具 `drvw_debug`**：注册为模型工具（仅包含**不写回工作区文件**的调试动作：`state`/`scan`，已移除 `revertAll`；cwd 限制为当前会话工作区；scan 有 2 秒节流，会更新插件自身的基线/缓存状态）。提示注入仍可能诱导模型调用它并向模型暴露当前工作区信息——模型本身已具备工作区文件访问能力，此风险与直接使用 fs/shell 工具相当。
 - **资源消耗**：扫描/基线缓存有上限（`maxFiles` / `primeMaxFiles` / `primeMaxChars`，可配置），但设置过大会显著增加内存与扫描耗时；待审阅项在内存中保留原文/修改文/当前文三份，长会话内存持续增长。
 - **Git 补读**：为恢复基线预算外文件的原始内容，插件会在 git 仓库中执行只读的 `git show`（经宿主 shell，10 秒超时，拒绝含通配符的路径）。该命令仅读取，不修改任何文件。
@@ -92,9 +92,8 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 - **删除 / 重命名不跟踪**：插件只跟踪「原位修改」。删除文件无法产生审阅项（也无法撤销删除）；重命名会被识别为「旧路径删除 + 新路径新增」，两者都不在审阅范围内。
 - **大工作区截断（可配置）**：遍历达到 `maxFiles`（默认 20000）上限时停止，`getState` 返回 `truncated: true`，dock 会显示带当前上限的警示；基线预读上限 `primeMaxFiles`（默认 6000）/ `primeMaxChars`（默认 48MB）也可在 设置 → Diff 审阅插件 调整。注意：上限设得过大可能显著增加内存占用与扫描耗时。
 - **临时原始文件**：打开外部 diff 时，原始内容以 `dsh-dr-tmp-orig-*` 前缀写入**系统临时目录**（OS 自动清理，不污染工作区、不会进入 git）；若宿主沙箱不允许写系统临时目录，则回退写入工作区 `.dsh-dr-tmp-orig/` 子目录（建议加入 `.gitignore`）。
-- **外部编辑器权限**：「其他打开方式」以完全沙箱访问（`danger-full-access`）启动外部编辑器进程——仅在你主动点击时发生，用于让 GUI 应用正常运行。
-- **本地路由写操作校验来源**：`/dsh-diff-review` 的写/危险操作（撤销、全部保留、打开外部编辑器、保存配置）校验请求 Origin：带跨站 Origin 的请求被拒绝（防浏览器 CSRF 静默触发），同源请求与无 Origin 的本地客户端不受影响。
-- **Host 回环白名单 + 读接口也校验**：所有请求（含 `getState`/`getItem`）校验 Host 必须为 `localhost`/`127.0.0.1`/`[::1]`（或与服务器实际监听地址一致）——防 DNS 重绑定攻击绕过 Origin 校验、静默读取工作区文件信息。
+- **外部编辑器权限**：「其他打开方式」以完全沙箱访问（`danger-full-access`）启动外部编辑器/资源管理器进程——仅在你主动点击时发生，用于让 GUI 应用正常运行。
+- **过渡期 HTTP 路由校验**（迁移完成后删除）：`/dsh-diff-review` 在过渡期内保留——写/危险操作校验请求 Origin（防 CSRF）、所有请求校验 Host 回环白名单 + 客户端来源回环（防 DNS 重绑定与非回环暴露）。typert 迁移完成后该路由及防护整体移除。
 - **路径边界防护**：扫描与写回均校验解析后的真实路径（含软链接解析）必须位于工作区根目录内，越界的 symlink/junction 不纳入对比、revert/redo 拒绝写回。
 - **编辑器路径控制字符校验**：`saveEditorConfig` 拒绝含换行/控制字符的路径（路径最终进入 PowerShell 命令，杜绝脚本注入面）。
 - **会话标题依赖 dsh 生成**：会话组标签优先显示 dsh 会话标题（`session/title` 事件）；新会话首回合尚未生成标题时显示会话短 id 占位，回合结束后自动更新。
@@ -103,9 +102,11 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 
 ```bash
 npm run build   # 从 src/ 生成 lib/
+npm test        # vitest 单元测试（纯函数：路径/边界/敏感名单/diff 算法）
 ```
 
-`src/index.ts` 为宿主半（ESM，`name`/`inject`/`apply`），`src/client/index.ts` 为客户端半（打包为 `window.__ModuleLoader__.load` 格式）。
+- `src/index.ts` 为宿主半（ESM，`name`/`inject`/`apply`），`src/host/util.ts` 为纯函数工具（可单测），`src/host/typert.ts` 为 typert 描述符（wire 契约）
+- `src/client/index.ts` 为客户端半（打包为 `window.__ModuleLoader__.load` 格式），`scripts/build.mjs` 将 host 多文件与 client 单文件转至 `lib/`
 
 ## 许可
 

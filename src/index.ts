@@ -593,7 +593,9 @@ export function apply(ctx) {
     return null
   }
 
-  // ---- 业务动作分发（替代动态 harness.handle） ----
+  // ---- 业务动作分发 ----
+  // 两个入口共用：v0.4 的 typert DiffReviewService（agent 注入，主通道）与
+  // webServer 过渡路由（client 回退用）。动作 + args 的契约一致。
   async function handleAction(action, args) {
     switch (action) {
       case 'getEditorConfig': return readConfig()
@@ -808,7 +810,8 @@ export function apply(ctx) {
     }
   }
 
-  // ---- webServer 路由：POST /dsh-diff-review  { action, args } → JSON ----
+  // ---- webServer 路由（过渡）：POST /dsh-diff-review  { action, args } → JSON ----
+  // v0.4 起主通道为 typert；此路由供 client 在 typert 未就绪时回退，迁移验证完成后删除。
   const BODY_MAX_BYTES = 1024 * 1024
   function readBody(req) {
     return new Promise((resolve, reject) => {
