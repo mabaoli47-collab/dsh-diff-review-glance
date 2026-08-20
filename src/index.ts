@@ -314,6 +314,7 @@ export function apply(ctx) {
             status: 'pending',
             stats: diff.stats,
             hunks: diff.hunks,
+            degraded: !!diff.degraded,
           }
           s.items.set(id, item)
           group.items.set(c.path, item)
@@ -388,6 +389,10 @@ export function apply(ctx) {
       return { ok: true, status: item.status }
     }
     if (action === 'redo') {
+      // 与 revert 对称的守卫：原始内容未知/来自 git HEAD 的项禁止重做。
+      // 当前不可达（此类项无法进入 reverted 态，UI 也不提供重做按钮），
+      // 但作为防御性约束防止未来改动引入可达路径
+      if (item.original === null || item.gitOriginal) return { ok: false, error: 'no-original', message: '原始内容未知（或来自 git HEAD 非会话基线），无法重做' }
       const res = await applyFileWrite(s, item.file, item.modified, item.original)
       if (!res.ok) return res
       item.status = 'kept'
@@ -403,7 +408,7 @@ export function apply(ctx) {
   }
   function itemFull(item) {
     // originalMissing 时带 current，供 DiffView 显示当前文件内容；正常 diff 不传整个文件体
-    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, gitOriginal: !!item.gitOriginal, stats: item.stats, hunks: item.hunks, current: item.originalMissing ? item.current : undefined }
+    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, gitOriginal: !!item.gitOriginal, stats: item.stats, hunks: item.hunks, current: item.originalMissing ? item.current : undefined, degraded: !!item.degraded }
   }
 
   // ---- 标准 settings 注册（schemastery 兼容的鸭子类型 schema） ----
@@ -608,18 +613,21 @@ export function apply(ctx) {
         const id = args && args.itemId
         const item = id ? s.items.get(id) : undefined
         if (!item) return null
-        // 会话隔离：item 必须属于请求携带的会话（同工作区多会话时禁止跨会话读取）
+        // 会话隔离：必须携带会话标识且 item 属于该会话——缺省即拒绝（fail-closed）。
+        // typert 通道恒注入 agent 会话（不可省略）；HTTP 过渡通道缺省时不得退化为
+        // 工作区级访问（否则可按 itemId 读取任意会话的 diff 内容）
         const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
-        if (sid && item.sessionId !== sid) return null
+        if (!sid || item.sessionId !== sid) return null
         return itemFull(item)
       }
       case 'review': {
         const s = pickStore(args)
         if (!s) return { ok: false, error: 'no-store', message: '尚无活跃工作区' }
-        // 会话隔离：请求携带 sessionId 时，禁止操作其他会话的审阅项
+        // 会话隔离：必须携带会话标识且禁止操作其他会话的审阅项（fail-closed）
         const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
+        if (!sid) return { ok: false, error: 'no-store', message: '缺少会话标识，操作已拒绝' }
         const item = args && args.itemId ? s.items.get(args.itemId) : undefined
-        if (sid && item && item.sessionId !== sid) return { ok: false, error: 'no-store', message: '会话不匹配，操作已拒绝' }
+        if (item && item.sessionId !== sid) return { ok: false, error: 'no-store', message: '会话不匹配，操作已拒绝' }
         return reviewItem(s, args && args.itemId, args && args.action)
       }
       case 'reviewGroup': {
@@ -696,9 +704,10 @@ export function apply(ctx) {
     if (!s) return { ok: false, message: '尚无活跃工作区，无法打开' }
     const item = itemId ? s.items.get(itemId) : undefined
     if (!item) return { ok: false, message: '记录不存在（插件可能已重启）' }
-    // 会话隔离（与 getItem/review 一致）：携带 sessionId 时禁止跨会话触发写临时原文 + 启动进程
+    // 会话隔离（与 getItem/review 一致）：必须携带会话标识且禁止跨会话触发写临时原文 + 启动进程
     const sid = args && typeof args.sessionId === 'string' ? args.sessionId : null
-    if (sid && item.sessionId !== sid) return { ok: false, message: '会话不匹配，操作已拒绝' }
+    if (!sid) return { ok: false, message: '缺少会话标识，操作已拒绝' }
+    if (item.sessionId !== sid) return { ok: false, message: '会话不匹配，操作已拒绝' }
     if (!s.cwd) return { ok: false, message: '工作区尚未就绪' }
     try {
       let left = item.file
@@ -1139,5 +1148,5 @@ export function apply(ctx) {
     ctx.effect(() => typert.register(hostContribution()))
   }
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.4.5），typert 路由 + webServer 过渡路由:', ROUTE)
+  console.log('[dsh-diff-review] 正式插件已启动（v0.4.6），typert 路由 + webServer 过渡路由:', ROUTE)
 }

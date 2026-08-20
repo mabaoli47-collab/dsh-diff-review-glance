@@ -183,6 +183,9 @@ export function finalizeRows(rows) {
 export function computeDiff(original, current) {
   const a = splitLines(original)
   const b = splitLines(current)
+  // 超过 LCS 单元格上限时 lcsOps 退化为"全删+全增"（degraded）：与 lcsOps 内部
+  // 判断条件保持一致（n*m > MAX_LCS_CELLS），供 UI 对退化 diff 给出提示
+  const degraded = a.length * b.length > MAX_LCS_CELLS
   const ops = lcsOps(a, b)
   let adds = 0
   let dels = 0
@@ -212,5 +215,5 @@ export function computeDiff(original, current) {
     }
     return { rows: finalizeRows(rows), gap }
   })
-  return { stats: { adds, dels }, hunks }
+  return { stats: { adds, dels }, hunks, degraded }
 }

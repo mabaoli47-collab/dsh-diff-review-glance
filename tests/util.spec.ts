@@ -105,4 +105,15 @@ describe('splitLines / computeDiff', () => {
     expect(d.stats.dels).toBe(0)
     expect(d.hunks.length).toBe(0)
   })
+  it('computeDiff marks degraded when LCS cell cap is exceeded', () => {
+    // 超过 MAX_LCS_CELLS（4M）时退化为全删+全增：3000×2000 = 6M > 4M
+    const bigA = Array.from({ length: 3000 }, (_, i) => 'old line ' + i).join('\n')
+    const bigB = Array.from({ length: 2000 }, (_, i) => 'new line ' + i).join('\n')
+    const d = computeDiff(bigA, bigB)
+    expect(d.degraded).toBe(true)
+    expect(d.stats.dels).toBe(3000)
+    expect(d.stats.adds).toBe(2000)
+    // 常规规模不标记退化
+    expect(computeDiff('a\nb\nc\n', 'a\nb x\nc\n').degraded).toBe(false)
+  })
 })

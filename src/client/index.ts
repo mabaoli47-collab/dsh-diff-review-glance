@@ -149,15 +149,18 @@ function apply(ctx) {
       if (refreshQueued) { refreshQueued = false; refresh() }
     }
   }
-  // 请求序号：防止慢响应覆盖新请求的结果（快速展开/折叠同一 item 时的竞态）
-  let fetchSeq = 0
+  // 每个 item 独立请求序号：防止慢响应覆盖新请求的结果（快速展开/折叠同一 item 的竞态）。
+  // 按 itemId 分桶而非全局序号——展开 A 后再展开 B 时，A 的在途响应不会被 B 的序号
+  // 误判为过期而丢弃（否则 A 详情永远进不了缓存，界面一直停在"加载 diff…"）
+  const itemSeqs = new Map()
   async function fetchItem(itemId) {
     if (detailCache.has(itemId)) return detailCache.get(itemId)
-    const seq = ++fetchSeq
+    const seq = (itemSeqs.get(itemId) || 0) + 1
+    itemSeqs.set(itemId, seq)
     try {
       const d = await callHost('getItem', Object.assign({ itemId }, cwdArg()))
-      if (seq === fetchSeq && d) detailCache.set(itemId, d)
-      return seq === fetchSeq ? d : null
+      if (seq === itemSeqs.get(itemId) && d) detailCache.set(itemId, d)
+      return seq === itemSeqs.get(itemId) ? d : null
     } catch (e) { return null }
   }
   async function doReview(itemId, action) {
@@ -364,6 +367,9 @@ function apply(ctx) {
         React.createElement('span', { className: 'dshdr-stats' },
           React.createElement('span', { className: 'add' }, '+' + item.stats.adds),
           React.createElement('span', { className: 'del' }, '-' + item.stats.dels)),
+        item.degraded
+          ? React.createElement('span', { className: 'dshdr-note', title: '文件行数过多（超过约 2048×2048 行对），无法精确计算差异，已退化为全量删除+新增' }, '大文件 diff 已简化')
+          : null,
         React.createElement('label', { className: 'dshdr-switch', title: '仅显示改动行，未改动行折叠为计数' },
           React.createElement('input', { type: 'checkbox', checked: oc, onChange: () => toggleOnlyChanged() }),
           React.createElement('span', null, '只显示改动行'))),

@@ -100,3 +100,12 @@
 - **背景**：`STORES` 桶与 `s.items`（原文/修改/当前三份全文）无清理机制，长会话内存持续增长（README 风险声明已披露）。
 - **实施要点**：可选监听 dsh 会话销毁事件清理对应 `SESSIONS`/`store.sessions`/`STORES` 条目；或为 `s.items` 增加"已审阅项数量上限、超出淘汰最旧"的修剪策略。
 - **风险**：激进清理影响历史回看——需先确认 dsh 会话生命周期语义（会话是否 dispose、持久会话如何界定）。
+
+## 代码审查补充（v0.4.6 审查后待办）
+
+> 以下为 2025 外部代码审查中确认属实、但不阻塞当前版本的条目；已在本轮修复的（会话隔离 fail-closed、redo 守卫、degraded 提示、fetchItem 竞态）不重复列出。
+
+- **fs.resolve 软链语义测试（安全假设固化）**：`walkWorkspace` 的敏感文件过滤依赖 `fs.resolve(entry).displayPath` 返回**解析后真实路径**（`foo.txt -> .env` 用真实 basename 重判）。这是运行时服务行为假设，纯函数单测覆盖不了——需在阶段 0 的 `api-smoke.ps1`（或专门的集成脚本）里对宿主 fs 服务做一次断言：创建工作区内 symlink，验证 `displayPath`/`targetKey` 指向链接目标而非链接自身。
+- **临时文件清理**：`writeTempOriginal` 的 `dsh-dr-tmp-orig-*` 在编辑器打开期间驻留磁盘（tmpdir 由 OS 清理、工作区回退目录需用户 .gitignore）。建议 `openExternal` 成功后记录临时路径，在文件关闭/会话结束等时机清理，或至少在 README 说明清理方式。
+- **`fs.writeText` 原子性确认**：`applyFileWrite` 的 TOCTOU 残余窗口取决于 `fs.writeText` 是否对传入 target 做原子校验（当前 README 已声明该风险）。迁移删除 HTTP 路由时可一并核实宿主 fs 实现。
+- **`drvw_debug` 无会话 scan 的 `'debug'` 兜底**：`scan(s, sessionId || 'debug', ...)` 会在工作区留下一个 `debug` 会话组（罕见路径，工具缺 agent 上下文时触发）。保持现状，UI 聚合清理时留意。
