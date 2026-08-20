@@ -1,11 +1,14 @@
 // dsh-diff-review host half (formal plugin)
-// 从动态插件 v5.5 固化：harness.handle → webServer 路由，defineTool/registerTool → ctx.tools.register
+// 从动态插件 v5.5 固化；v0.4 起通信迁移到官方 typert RPC（agent 注入，天然会话绑定），
+// webServer HTTP 路由为过渡保留（待 client 全切后删除）
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { tmpdir } from 'node:os'
 import { join, posix } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { chmod } from 'node:fs/promises'
 import { canonCwd, IGNORE_DIRS, norm, relOf, isSensitiveFile, withinRoot, realPathBlocked, shortSessionId, turnKey, splitLines, computeDiff } from './host/util.js'
+import { hostContribution } from './host/typert.js'
 
 export const name = 'dsh-diff-review'
 // 只声明根组合顶层可见的服务；shell/sandboxPolicy 是 scoped/可选服务，用 ctx.get 惰性读取
@@ -1099,5 +1102,27 @@ export function apply(ctx) {
     }
   }))
 
-  console.log('[dsh-diff-review] 正式插件已启动（v0.3.25），webServer 路由:', ROUTE)
+  // ---- v0.4 typert RPC transport（官方通信通道）----
+  // agent 由运行时注入（scope.context='agent'）：方法内以 agent 会话为准，
+  // client 传入的 sessionId 一律被 agent 覆盖——调用者身份不可伪造，天然会话绑定。
+  // reviewSession 同样只作用于当前 agent 会话（跨会话操作在 typert 边界下收紧）。
+  const typert = ctx.get('typert')
+  if (typert && typeof typert.register === 'function') {
+    class DiffReviewService extends TypertRemoteService {
+      constructor() { super(ctx, 'diffReview') }
+      getState(agent, request) { return handleAction('getState', Object.assign({}, request, { sessionId: String(agent) })) }
+      getItem(agent, request) { return handleAction('getItem', Object.assign({}, request, { sessionId: String(agent) })) }
+      review(agent, request) { return handleAction('review', Object.assign({}, request, { sessionId: String(agent) })) }
+      reviewGroup(agent, request) { return handleAction('reviewGroup', Object.assign({}, request, { sessionId: String(agent) })) }
+      reviewSession(agent, request) { return handleAction('reviewSession', Object.assign({}, request, { sessionId: String(agent) })) }
+      reviewAll(agent, request) { return handleAction('reviewAll', Object.assign({}, request, { sessionId: String(agent) })) }
+      openExternal(agent, request) { return handleAction('openExternal', Object.assign({}, request, { sessionId: String(agent) })) }
+      getEditorConfig(agent, request) { return handleAction('getEditorConfig', Object.assign({}, request, { sessionId: String(agent) })) }
+      saveEditorConfig(agent, request) { return handleAction('saveEditorConfig', Object.assign({}, request, { sessionId: String(agent) })) }
+    }
+    new DiffReviewService()
+    ctx.effect(() => typert.register(hostContribution()))
+  }
+
+  console.log('[dsh-diff-review] 正式插件已启动（v0.4.0），typert 路由 + webServer 过渡路由:', ROUTE)
 }

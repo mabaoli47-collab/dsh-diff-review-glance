@@ -1,23 +1,61 @@
 // dsh-diff-review client half (formal plugin)
-// 从动态插件 v5.5 固化：host.call → fetch(webServer 路由)，styles.insert → 原生 CSS 注入
+// v0.4：通信迁移到官方 typert RPC（ctx.remote.$mount + 命名空间调用）；
+// agent 由运行时注入，无需再传 sessionId。webServer fetch 路由保留为过渡（host 侧未删）。
 import * as React from 'react'
 
+// ---- typert remote 描述符（与 host src/host/typert.ts 的 wire 契约一致；client 侧不依赖 zod，codec 用 src-json）----
+const REMOTE_PACKAGE = 'dsh-diff-review'
+const REMOTE_SERVICE = 'diffReview'
+const srcJson = { mode: 'src-json' }
+function descriptor(method) {
+  return {
+    id: REMOTE_PACKAGE + '#' + REMOTE_SERVICE + '/' + method,
+    service: REMOTE_SERVICE,
+    namespace: REMOTE_SERVICE,
+    method,
+    invocation: { kind: 'direct' },
+    scope: { context: 'agent', wire: 'agentId' },
+    parameters: [
+      { name: 'agent', wire: 'agentId', source: 'lookup', lookup: 'agent', codec: srcJson },
+      { name: 'request', wire: 'request', source: 'json', codec: srcJson },
+    ],
+    result: srcJson,
+  }
+}
+const TYPERT_REMOTE = {
+  package: REMOTE_PACKAGE,
+  descriptors: ['getState', 'getItem', 'review', 'reviewGroup', 'reviewSession', 'reviewAll', 'openExternal', 'getEditorConfig', 'saveEditorConfig'].map(descriptor),
+}
 
+// 过渡期的 fetch 回退路由（host 侧 webServer 路由保留期间可用）
 const ROUTE = '/dsh-diff-review'
-const FETCH_TIMEOUT_MS = 15000
+let pluginCtx = null
 
-function callHost(action, args) {
-  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
-  const timer = controller ? setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS) : null
-  return fetch(ROUTE, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ action, args: args || {} }),
-    ...(controller ? { signal: controller.signal } : {}),
-  }).then(async (res) => {
-    if (!res.ok) throw new Error('dsh-diff-review: host HTTP ' + res.status)
-    return res.json()
-  }).finally(() => { if (timer) clearTimeout(timer) })
+let remoteNs = null
+async function initRemote() {
+  if (remoteNs) return remoteNs
+  if (!pluginCtx || !pluginCtx.remote) throw new Error('dsh-diff-review: client remote service unavailable')
+  await pluginCtx.remote.$mount(TYPERT_REMOTE)
+  remoteNs = pluginCtx.get('remote.' + REMOTE_SERVICE)
+  if (!remoteNs) throw new Error('dsh-diff-review: diffReview remote unavailable')
+  return remoteNs
+}
+
+// callHost：typert RPC 调用（agent 由运行时注入）；失败回退到过渡的 fetch 路由
+async function callHost(action, args) {
+  try {
+    const ns = await initRemote()
+    return await ns[action](args || {})
+  } catch (e) {
+    return fetch(ROUTE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action, args: args || {} }),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error('dsh-diff-review: host HTTP ' + res.status)
+      return res.json()
+    })
+  }
 }
 
 let styleTag = null
@@ -36,6 +74,7 @@ function injectCss(css) {
 }
 
 function apply(ctx) {
+  pluginCtx = ctx
   const slots = ctx.slots || ctx.get('slots')
   if (slots === undefined) return
 

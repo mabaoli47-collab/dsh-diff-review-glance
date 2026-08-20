@@ -28,7 +28,7 @@ function readSource(path) {
 // ---- host (multi-file) ----
 // src/index.ts 与 src/host/*.ts 逐文件转 lib/（保留相对 import，如 './host/util.js'；
 // Node ESM 按显式 .js 扩展名解析）。import type 行剥离。
-const hostFiles = ['src/index.ts', 'src/host/util.ts']
+const hostFiles = ['src/index.ts', 'src/host/util.ts', 'src/host/typert.ts']
 for (const rel of hostFiles) {
   const outRel = rel.replace(/^src\//, '').replace(/\.ts$/, '.js')
   const outPath = join(lib, outRel)
@@ -53,7 +53,7 @@ const banner = `window.__ModuleLoader__.load({ id: 'dsh-diff-review', factory: (
   var module = { exports: {} };
   var exports = module.exports;
 ${clientBody}
-  exports.inject = ['timer', 'slots'];
+  exports.inject = ['timer', 'slots', 'remote'];
   exports.apply = apply;
   return module.exports;
 } });
