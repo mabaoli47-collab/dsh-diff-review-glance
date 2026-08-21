@@ -1,13 +1,48 @@
 # dsh-diff-review bundle patch
 #
-# Installed through the dsh plugin CLI:
+# This file is the `dsh.bundle.patch` layer of the published npm package: when
+# the plugin is installed through the official CLI —
+#
+#   dsh plugin --profile <name> add dsh-diff-review@<version>
+#
+# — the command reconciles `dsh.profile.bundles` against installed packages
+# and, seeing this declaration, appends `dsh-diff-review` to the bundle
+# stack. The profile boot then merges THIS patch (a single `insert` of the
+# plugin row) exactly like a manual cordis.patch.yml mount line. No profile
+# file edits needed — one command installs and mounts.
+#
+# You can also install from a local path (e.g. for development):
 #
 #   dsh plugin --profile <name> add file:<path-to-this-package>
 #
-# The CLI reconciles dsh.profile.bundles and appends this bundle to the stack;
-# the profile boot merges THIS patch (a single insert of the plugin row) into
-# the composition. Host half loads from lib/index.js; client half is served
-# from lib/client.js via the dsh.client manifest.
+# If the profile still carries an old manual mount line for dsh-diff-review
+# in its own cordis.patch.yml, remove it before switching to the bundle
+# channel to avoid double-mounting (two host halves, two docks).
+#
+# All runtime configuration lives in dsh settings (Settings → Diff 审阅插件),
+# namespace `dsh-diff-review` in ~/.dsh/settings.yaml — no cordis config is
+# required. The row below intentionally carries no `config` block; if you
+# need composition-time defaults, add one here:
+#
+#   - insert:
+#       - id: dsh-diff-review
+#         name: 'dsh-diff-review'
+#         config:
+#           detectMode: live
+#
+# Aggregate double-mount guard: aggregate bundles (e.g. @linxin666/dsh-web-ui-all)
+# may already mount this package under their own entry id. Two mounts register
+# the same services/UI twice and fail the whole plugin tree at boot. The
+# `!!js` disabled expression backs THIS row off when another *enabled* entry
+# already mounts `dsh-diff-review`; the aggregate instance then owns the UI.
+# The loader evaluates it when this row is processed (entry-list order, only
+# rows before this one are visible), so the aggregate bundle must precede this
+# one in `dsh.profile.bundles` — the standard install order, since `dsh plugin add`
+# appends new bundles last. The reverse order (this bundle before the
+# aggregate) is a known limitation: the guard cannot see rows that come after
+# it, and no runtime singleton guard is added. Same-id manual duplicates still
+# fail loudly at the loader as before.
 - insert:
     - id: dsh-diff-review
       name: 'dsh-diff-review'
+      disabled: !!js "[...ctx.loader.entries()].some((e) => e.options.name === 'dsh-diff-review' && e.options.id !== 'dsh-diff-review' && !e.disabled)"
