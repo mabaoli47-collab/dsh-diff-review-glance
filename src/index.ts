@@ -977,7 +977,9 @@ export function apply(ctx) {
       settings.register(CONFIG_NS, schema)
       settingsRegistered = true
     } catch (e) {
-      console.error('[dsh-diff-review] settings 注册失败', e)
+      // 完整堆栈（含 cause/校验详情）便于判断是 duplicate namespace 还是 schema 拒绝
+      const err = e instanceof Error ? e : new Error(String(e))
+      console.error('[dsh-diff-review] settings 注册失败: ' + (err.stack || err.message) + (err.cause ? '\n  cause: ' + String(err.cause) : ''))
     }
   }
 
@@ -1313,7 +1315,11 @@ export function apply(ctx) {
         }
         return { ok: true, config: { code: patch.code, devenv: patch.devenv, vsDiffMerge: patch.vsDiffMerge, detectMode: patch.detectMode, liveRevert: patch.liveRevert, respectGitignore: patch.respectGitignore } }
       })
-      .catch((e) => ({ ok: false, message: (e && e.message) || String(e) }))
+      .catch((e) => {
+        const err = e instanceof Error ? e : new Error(String(e))
+        console.error('[dsh-diff-review] saveEditorConfig settings.update 失败: ' + (err.stack || err.message) + (err.cause ? '\n  cause: ' + String(err.cause) : ''))
+        return { ok: false, message: (e && e.message) || String(e) }
+      })
   }
 
   async function openExternal(args) {
@@ -1627,7 +1633,8 @@ export function apply(ctx) {
   }
   // 会话登记：agent 可能由 typert wire 层注入为 sessionId 字符串（agentSessionId 注释
   // 已确认两种形状），也可能由模型工具通道注入为完整 agent 对象。对象路径直接读
-  // session.header.cwd；字符串路径从持久化会话 header（sessionPersistence）恢复 cwd——
+  // session.header.cwd；字符串/精简对象路径从持久化会话 header（sessionPersistence）、
+  // live session store（sessions）、或已有登记记录依次恢复 cwd——
   // 否则 registerSession 对字符串返回 null，会话永不登记，dock 永远"未识别"。
   // 诊断日志去重：getState 每 2 秒轮询会高频调用 registerSession，同一会话只打一次
   // 关键路径日志（agent 形状 / 持久化恢复结果），避免刷屏；失败路径每次打印便于排查
@@ -1646,34 +1653,45 @@ export function apply(ctx) {
       session = agent.session
       sid = session.id != null ? String(session.id) : null
       cwd = session.header ? session.header.cwd : null
-    } else if (typeof agent === 'string' && agent) {
-      sid = agent
-      // 字符串 agent 无 header：从持久化会话 header 恢复 cwd（wire 注入为 sessionId 时的兜底）
+    } else {
+      // 字符串 agent（wire 注入为 sessionId）或精简对象（{id}/{sessionId}）：
+      // 依次从持久化 header → live sessions store → 已有登记记录恢复 cwd
+      sid = typeof agent === 'string' ? agent
+        : agent && typeof agent === 'object'
+          ? (agent.id != null ? String(agent.id) : agent.sessionId != null ? String(agent.sessionId) : null)
+          : null
       const persisted = ctx.get('sessionPersistence')
       let restored = false
-      if (persisted && typeof persisted.inspect === 'function') {
+      if (sid && persisted && typeof persisted.inspect === 'function') {
         try {
-          const inspected = await persisted.inspect(agent)
+          const inspected = await persisted.inspect(sid)
           cwd = inspected && inspected.meta ? inspected.meta.cwd : null
           restored = true
         } catch (e) { cwd = null }
       }
-      // 若持久化查询不可用/失败，回退到已有登记记录（同会话曾以对象注入登记过）
-      if (!cwd) {
-        const prev = SESSIONS.get(agent)
+      // 二级回退：live session store（sessions.get(id).header.cwd）
+      if (sid && !cwd) {
+        const sessions = ctx.get('sessions')
+        if (sessions && typeof sessions.get === 'function') {
+          try {
+            const liveSession = sessions.get(sid)
+            cwd = liveSession && liveSession.header ? liveSession.header.cwd : null
+          } catch (e) { cwd = null }
+        }
+      }
+      // 三级回退：已有登记记录（同会话曾以对象注入登记过）
+      if (sid && !cwd) {
+        const prev = SESSIONS.get(sid)
         if (prev) cwd = prev.cwd
       }
-      if (diagAgent.get(sid) !== shape) {
+      if (sid && diagAgent.get(sid) !== shape) {
         diagAgent.set(sid, shape)
         console.error('[dsh-diff-review] registerSession agent 形状=' + shape + ' sessionId=' + sid + ' persistence=' + String(!!persisted) + ' restored=' + restored)
       }
-      if (diagCwd.get(sid) !== String(cwd)) {
+      if (sid && diagCwd.get(sid) !== String(cwd)) {
         diagCwd.set(sid, String(cwd))
-        console.error('[dsh-diff-review] registerSession 字符串 agent cwd 恢复: sessionId=' + sid + ' cwd=' + String(cwd))
+        console.error('[dsh-diff-review] registerSession ' + shape + ' agent cwd 恢复: sessionId=' + sid + ' cwd=' + String(cwd))
       }
-    } else if (diagAgent.get(String(sid || agent)) !== shape) {
-      diagAgent.set(String(sid || agent), shape)
-      console.error('[dsh-diff-review] registerSession agent 形状=' + shape + '（未处理，返回 null）')
     }
     if (!sid || !cwd) return null
     const c = canonCwd(cwd)
