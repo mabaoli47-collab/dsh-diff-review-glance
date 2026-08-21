@@ -138,6 +138,15 @@ function apply(ctx) {
     fetching = true
     try {
       const st = await callHost('getState', cwdArg())
+      // client 诊断（去重：仅字段变化时打印一次，避免 2 秒轮询刷屏）
+      try {
+        const sig = (st ? [st.sessionId, st.workspaceId, st.sessionKnown, st.hostError, st.loading].join('|') : 'null')
+        if (window && !window.__dshdrLastSig) window.__dshdrLastSig = ''
+        if (typeof window !== 'undefined' && window.__dshdrLastSig !== sig) {
+          window.__dshdrLastSig = sig
+          console.error('[dsh-diff-review] getState 响应: sessionId=' + String(st && st.sessionId) + ' workspaceId=' + String(st && st.workspaceId) + ' sessionKnown=' + String(st && st.sessionKnown) + ' hostError=' + String(st && st.hostError) + ' loading=' + String(st && st.loading))
+        }
+      } catch (e) { /* 诊断失败忽略 */ }
       if (st && Array.isArray(st.pending) && Array.isArray(st.groups)) {
         // 版本防护：v0.3.7 客户端 + 旧版宿主（返回旧 schema，无 workspaceId）→
         // 提示重启 dsh，而不是把缺失字段误读成"未识别工作区"
@@ -657,6 +666,7 @@ function apply(ctx) {
     React.useEffect(() => {
       let alive = true
       callHost('getEditorConfig', {}).then((c) => {
+        console.error('[dsh-diff-review] getEditorConfig 响应: ' + JSON.stringify(c))
         if (alive && c) {
           setCfg({
             code: c.code || '', devenv: c.devenv || '', vsDiffMerge: c.vsDiffMerge || '',
@@ -683,8 +693,9 @@ function apply(ctx) {
           extraIgnoreFiles: cfg.extraIgnoreFiles || '',
           trackNewFiles: cfg.trackNewFiles,
         })
+        console.error('[dsh-diff-review] saveEditorConfig 响应: ' + JSON.stringify(r))
         setStatus(r && r.ok === true ? { ok: true, message: '已保存（标准 settings 注册，写入 settings.yaml）' } : { ok: false, message: (r && r.message) || '保存失败' })
-      } catch (e) { setStatus({ ok: false, message: '保存失败' }) }
+      } catch (e) { console.error('[dsh-diff-review] saveEditorConfig 调用抛错', e); setStatus({ ok: false, message: '保存失败' }) }
     }
     const field = (key, label, ph, type) => React.createElement('label', { className: 'dshdr-cfg-field', key: key },
       React.createElement('span', null, label),
