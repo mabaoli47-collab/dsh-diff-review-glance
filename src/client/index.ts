@@ -283,7 +283,7 @@ function apply(ctx) {
   refresh()
 
   injectCss('\n' +
-    '.dshdr-dock { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: var(--dsh-composer-card-max-width); margin: 2px auto 8px; max-height: 60vh; overflow-y: auto; overflow-x: hidden; }\n' +
+    '.dshdr-dock { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: var(--dsh-composer-card-max-width); margin: 2px auto 8px; }\n' +
     '.dshdr-bar { display: flex; align-items: center; gap: 10px; padding: 7px 12px; border: 1px solid rgba(128,128,128,0.4); border-radius: 10px; background: rgba(128,128,128,0.16); cursor: pointer; user-select: none; }\n' +
     '.dshdr-bar:hover { background: rgba(128,128,128,0.24); }\n' +
     '.dshdr-title { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px; }\n' +
@@ -307,7 +307,7 @@ function apply(ctx) {
     '.dshdr-badge-pending { background: rgba(210,153,34,0.3); color: #d29922; }\n' +
     '.dshdr-badge-kept { background: rgba(46,160,67,0.25); color: #2ea043; }\n' +
     '.dshdr-badge-reverted { background: rgba(139,148,158,0.3); color: #8b949e; }\n' +
-    '.dshdr-turn { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; padding: 8px 10px; border: 1px solid rgba(128,128,128,0.35); border-radius: 10px; background: rgba(128,128,128,0.1); }\n' +
+    '.dshdr-turn { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; padding: 8px 10px; border: 1px solid rgba(128,128,128,0.35); border-radius: 10px; background: rgba(128,128,128,0.1); max-height: 50vh; overflow-y: auto; overflow-x: hidden; }\n' +
     '.dshdr-turn-head { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 600; flex-wrap: wrap; }\n' +
     '.dshdr-turn-actions { margin-left: auto; display: flex; gap: 6px; }\n' +
     '.dshdr-diff { border: 1px solid rgba(128,128,128,0.35); border-radius: 8px; overflow: hidden; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5; }\n' +
