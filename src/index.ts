@@ -1653,6 +1653,46 @@ export function apply(ctx) {
       session = agent.session
       sid = session.id != null ? String(session.id) : null
       cwd = session.header ? session.header.cwd : null
+      // 对象路径诊断（每个会话首次）：完整 agent 也应能看到 header/cwd 实际值
+      if (sid && diagAgent.get(sid) !== shape) {
+        diagAgent.set(sid, shape)
+        let headerKeys = 'none'
+        let headerCwd = 'none'
+        try {
+          if (session.header) {
+            headerKeys = Object.keys(session.header).join(',')
+            headerCwd = String(session.header.cwd)
+          }
+        } catch (e) { headerKeys = 'err' }
+        console.error('[dsh-diff-review] registerSession agent 形状=' + shape + ' sessionId=' + sid + ' headerKeys=' + headerKeys + ' header.cwd=' + headerCwd)
+      }
+      // 对象 agent 的 header.cwd 缺失时同样走持久化/live store 回退
+      if (sid && !cwd) {
+        const persisted = ctx.get('sessionPersistence')
+        if (persisted && typeof persisted.inspect === 'function') {
+          try {
+            const inspected = await persisted.inspect(sid)
+            cwd = inspected && inspected.meta ? inspected.meta.cwd : null
+          } catch (e) { cwd = null }
+        }
+        if (!cwd) {
+          const sessions = ctx.get('sessions')
+          if (sessions && typeof sessions.get === 'function') {
+            try {
+              const liveSession = sessions.get(sid)
+              cwd = liveSession && liveSession.header ? liveSession.header.cwd : null
+            } catch (e) { cwd = null }
+          }
+        }
+        if (!cwd) {
+          const prev = SESSIONS.get(sid)
+          if (prev) cwd = prev.cwd
+        }
+        if (sid && diagCwd.get(sid) !== String(cwd)) {
+          diagCwd.set(sid, String(cwd))
+          console.error('[dsh-diff-review] registerSession object agent cwd 回退: sessionId=' + sid + ' cwd=' + String(cwd))
+        }
+      }
     } else {
       // 字符串 agent（wire 注入为 sessionId）或精简对象（{id}/{sessionId}）：
       // 依次从持久化 header → live sessions store → 已有登记记录恢复 cwd
