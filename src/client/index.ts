@@ -59,16 +59,26 @@ async function initRemote() {
 }
 
 // callHost：唯一通道 = typert RPC（agent 由运行时注入，会话绑定不可伪造）。
-// 宿主 client runtime 把 descriptor 的 lookup 参数（agent）也算进调用参数位
-// （"expected 2 argument(s), got 1"）——第 1 参传 undefined 占位，wire 层按 scope
-// lookup 注入真实 agent（host 侧方法签名为 (agent, request)）。
-// 返回解包：typert 命名空间方法返回 RemoteResult<{ ok, value }> 包装，业务数据在
-// value 里——官方 client（ui-goal 等）均用 result.value 读取。不解包会导致
-// 顶层字段全 undefined（dock 永远"未识别"、保存永远失败）。
+// 调用约定（v0.16.5 修正）：命名空间方法接收**业务参数**（request）——descriptor 的
+// lookup 参数（agent）由 client runtime 按 scope 投影注入，**不占调用参数位**。
+// gateway 的 expected = parameters.length - (projection?1:0) = 1，所以传
+// ns[action](request) 单参数即可。v0.16.4 曾误传 (undefined, request) 两参，
+// 导致 invoke 把 undefined 当 request（request 字段 undefined 不写入 args），
+// host 报 "args fields do not match the descriptor: missing \"request\""。
+// 返回解包：命名空间方法返回 RemoteResult<{ ok, value }> 包装，业务数据在 value 里
+// （官方 client 均用 result.value 读取）。
 async function callHost(action, args) {
   try {
     const ns = await initRemote()
-    const r = await ns[action](undefined, args || {})
+    const r = await ns[action](args || {})
+    // 诊断：打印 r 的原始形状（类型 + 键列表 + ok/value 摘要），字段变化时打一次
+    try {
+      const sig = action + ':' + (r == null ? 'null' : typeof r === 'object' ? Object.keys(r).join(',') : typeof r) + ':' + String(r && typeof r === 'object' ? (r.ok === true ? 'ok:' + JSON.stringify(r.value).substring(0, 200) : 'err:' + JSON.stringify(r.error)) : r)
+      if (typeof window !== 'undefined' && window.__dshdrRpcSig !== sig) {
+        window.__dshdrRpcSig = sig
+        console.error('[dsh-diff-review] callHost 原始返回(' + action + '): ' + sig)
+      }
+    } catch (de) { /* 诊断失败忽略 */ }
     if (r && typeof r === 'object' && 'ok' in r) {
       if (r.ok === true) return r.value
       // ok=false：RPC 层业务错误，返回带 message 的错误对象（与旧 HTTP 语义一致）
