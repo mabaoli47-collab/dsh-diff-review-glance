@@ -919,8 +919,10 @@ export function apply(ctx) {
     return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, gitOriginal: !!item.gitOriginal, stats: item.stats, live: !!item.live }
   }
   function itemFull(item) {
-    // originalMissing 时带 current，供 DiffView 显示当前文件内容；正常 diff 不传整个文件体
-    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, gitOriginal: !!item.gitOriginal, stats: item.stats, hunks: item.hunks, current: item.originalMissing ? item.current : undefined, degraded: !!item.degraded, live: !!item.live }
+    // originalMissing 时带 current，供 DiffView 显示当前文件内容；正常 diff 不传整个文件体。
+    // 注意：undefined 字段过不了 typert 的 JSON 边界校验（"business result failed
+    // boundary validation"），用条件展开保证返回值里不含 undefined 属性。
+    return { id: item.id, sessionId: item.sessionId, turn: item.turn, file: item.file, relPath: item.relPath, status: item.status, originalMissing: item.originalMissing, gitOriginal: !!item.gitOriginal, stats: item.stats, hunks: item.hunks, ...(item.originalMissing ? { current: item.current } : {}), degraded: !!item.degraded, live: !!item.live }
   }
 
   // ---- 标准 settings 注册（schemastery 兼容的鸭子类型 schema） ----

@@ -72,6 +72,22 @@ if (!emptyMatch) {
 const typertSrc = readFileSync(join(root, 'lib/host/typert.js'), 'utf8')
 ok(typertSrc.includes('clearReviewed'), 'lib/host/typert.js missing clearReviewed descriptor')
 
+// 9. no undefined-valued fields in returned object literals. The typert
+//    gateway rejects any business result containing an undefined value
+//    ("business result failed boundary validation" — undefined is not in
+//    the JSON-safe whitelist). Catch the two common shapes:
+//    - "key: undefined" written literally
+//    - "key: <expr> ? a : undefined" conditional tails (the itemFull bug)
+//    inside src/index.ts return objects. (A blanket `: undefined` check
+//    would false-positive on internal variables, so only object literal
+//    fields of return statements are scanned.)
+const srcIndexAll = readFileSync(join(root, 'src/index.ts'), 'utf8')
+const undefInReturn = [...srcIndexAll.matchAll(/return\s*\{[^}]*\}/g)]
+  .map((m) => m[0])
+  .filter((blob) => /:\s*undefined\s*[,}]/.test(blob))
+  .map((blob) => blob.replace(/\s+/g, ' ').substring(0, 120))
+ok(undefInReturn.length === 0, 'src/index.ts return object has undefined-valued field (typert JSON boundary): ' + undefInReturn.join(' | '))
+
 if (errors.length > 0) {
   console.error('[verify-pack] FAIL:\n- ' + errors.join('\n- '))
   process.exit(1)
