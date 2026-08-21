@@ -35,6 +35,9 @@ const TYPERT_REMOTE = {
 
 let pluginCtx = null
 
+// callHost 读取当前 sessionId 的闭包引用（apply 内赋值），用作 lookup 参数
+let getCurrentSessionId = () => ''
+
 let remoteNs = null
 async function initRemote() {
   if (remoteNs) return remoteNs
@@ -58,19 +61,21 @@ async function initRemote() {
   return remoteNs
 }
 
-// callHost：唯一通道 = typert RPC（agent 由运行时注入，会话绑定不可伪造）。
-// 调用约定（v0.16.5 修正）：命名空间方法接收**业务参数**（request）——descriptor 的
-// lookup 参数（agent）由 client runtime 按 scope 投影注入，**不占调用参数位**。
-// gateway 的 expected = parameters.length - (projection?1:0) = 1，所以传
-// ns[action](request) 单参数即可。v0.16.4 曾误传 (undefined, request) 两参，
-// 导致 invoke 把 undefined 当 request（request 字段 undefined 不写入 args），
-// host 报 "args fields do not match the descriptor: missing \"request\""。
-// 返回解包：命名空间方法返回 RemoteResult<{ ok, value }> 包装，业务数据在 value 里
-// （官方 client 均用 result.value 读取）。
+// callHost：唯一通道 = typert RPC。
+// 调用约定（v0.16.5 修正）：官方生成的命名空间方法签名 = (lookup 参数, 业务参数...)。
+// 官方 client（ui-goal 等）显式传 sessionId 作为 lookup 参数（agent 标识），如
+// ctx.remote.goals.edit(sessionId, ref, req)——gateway 用 resolveAgent(sessionId) 注入
+// 完整 agent 到 host 方法。本插件 descriptor 的 lookup 参数是第一个（agent），业务
+// 参数是第二个（request），故调用为 ns[action](sessionId, request)。sessionId 来自
+// slot standard props（resolveCurrentSession 捕获，见 apply 内 currentSessionId）。
+// 之前的错误链：v0.16.4 传 (undefined, request) 使 request 落错位（arity 2 通过但
+// host 断言缺 request）；ca71e7d 传 (request) 单参又少了 lookup 位（arity 期望 2）。
+// 返回解包：命名空间方法返回 RemoteResult<{ ok, value }> 包装，业务数据在 value 里。
 async function callHost(action, args) {
   try {
     const ns = await initRemote()
-    const r = await ns[action](args || {})
+    const sid = typeof getCurrentSessionId === 'function' ? getCurrentSessionId() : ''
+    const r = await ns[action](sid, args || {})
     // 诊断：打印 r 的原始形状（类型 + 键列表 + ok/value 摘要），字段变化时打一次
     try {
       const sig = action + ':' + (r == null ? 'null' : typeof r === 'object' ? Object.keys(r).join(',') : typeof r) + ':' + String(r && typeof r === 'object' ? (r.ok === true ? 'ok:' + JSON.stringify(r.value).substring(0, 200) : 'err:' + JSON.stringify(r.error)) : r)
@@ -110,6 +115,10 @@ function apply(ctx) {
   pluginCtx = ctx
   const slots = ctx.slots || ctx.get('slots')
   if (slots === undefined) return
+  // callHost 需要显式传 sessionId 作为 lookup 参数（官方 typert 调用约定）——
+  // 通过闭包函数暴露 apply 内的 currentSessionId
+  let currentSessionIdRef = ''
+  getCurrentSessionId = () => currentSessionIdRef
 
   // 初始 state 补全全部字段：首帧渲染（fetch 尚未返回）时不出现「未知工作区」误导文案，
   // 而是按"未识别"处理，等首次轮询返回后纠正
@@ -124,6 +133,7 @@ function apply(ctx) {
     try {
       if (props && typeof props.sessionId === 'string' && props.sessionId) {
         currentSessionId = props.sessionId
+        currentSessionIdRef = props.sessionId
       }
     } catch (e) { /* 忽略 */ }
     // 会话标识就绪/变化时立即拉取一次，避免"刷新后首帧拿不到 sessionId"的未识别卡顿
