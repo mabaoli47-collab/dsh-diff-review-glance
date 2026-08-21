@@ -94,7 +94,7 @@ dsh plugin --profile web add "file:%TEMP%\dsh-diff-review"
 - **检测时机**：`agent/turn-stopping`（回合结束）触发全量 `walkWorkspace` 版本对比（默认，跨平台）；`detectMode=live` 时额外用 `fs.watch` 递归监听工作区，事件去抖 600ms 后做**单文件/全量增量比对**（watcher 只当触发器，正确性仍以版本对比为准，回合末全量扫描保留为兜底——watcher 丢事件只会延迟不会漏检；另有 8 秒事件静默自动全量兜底，空闲时指数退避 5s→80s），实时变更挂 `store.live` 预览桶，**开启 `liveRevert` 后可在进行中撤销**（`applyFileWrite` 版本冲突保护：AI 已改过则拒绝；撤销成功后该项冻结、文件恢复会话基线，回合扫描因 `original===current` 天然不重复产生正式项），回合结束正式扫描后清空并入正式审阅项
 - **仅跟踪修改**：新文件只缓存不产生审阅项（符合「仅包括修改」）；文件版本变化才生成 diff
 - **原文来源与不可撤销项**：审阅项的「原始内容」优先取会话基线缓存；基线预算未覆盖的文件被修改时，经宿主 shell 只读 `git show HEAD:<relPath>` 补读（详见风险声明「Git 补读」）；git 补读得到的原文标记 `gitOriginal`——**仅用于 diff 展示，不可撤销/重做**（避免回退到 HEAD 吞掉会话前未提交的工作）；两者皆失败则标记 `originalMissing`，仅可保留
-- **通信（v0.4 起）**：host 通过**官方 typert RPC**（`dsh-typert-protocol`）暴露服务——调用方 `agent` 由运行时注入，**会话绑定不可伪造**；client 经 `ctx.remote` 挂载描述符后调用命名空间方法。**typert 为唯一通道**（v0.8 起移除过渡 HTTP 路由），无 HTTP 攻击面。**调用约定（v0.16.3/0.16.4 修复后固化）**：descriptor 的 result/参数必须 strict codec（宿主 client loader 拒绝 src-json）；lookup 参数（agent）计入调用 arity，client 需传 `(undefined, request)` 占位。
+- **通信（v0.4 起）**：host 通过**官方 typert RPC**（`dsh-typert-protocol`）暴露服务——调用方 `agent` 由运行时注入，**会话绑定不可伪造**；client 经 `ctx.remote` 挂载描述符后调用命名空间方法。**typert 为唯一通道**（v0.8 起移除过渡 HTTP 路由），无 HTTP 攻击面。**调用约定（v0.16.5 修正后固化）**：descriptor 的 result/参数必须 strict codec（宿主 client loader 拒绝 src-json）；命名空间方法签名 = (lookup 参数, 业务参数...)，client **显式传当前会话 sessionId 作 lookup 参数**（官方 `ctx.remote.goals.edit(sessionId, ref, req)` 模式，不可用 `(undefined, request)` 占位）；返回是 `RemoteResult` 信封（`{ok, value}`），业务数据在 `value` 里须解包；host 返回必须纯 JSON 安全（**含 undefined 值会被 gateway 边界校验拒绝**）。
 
 ## 权限说明
 
@@ -169,7 +169,8 @@ npm pack --dry-run  # 完整发布链（prepack = build + test + verify:pack）
 | v0.15.2 | **评审修复（P2）**：`giCachedUpTo` 缓存查询前置（命中零 FS 开销）；`cachedGitignoreRules` 接受外部 version（walk 省 stat）；dry-run scan 输出 `changedCount` 且跳过 diff 计算；单模式通配符上限 64（闭合指数回溯 ReDoS）；失效矩阵补全（extraLayers/saveEditorConfig 清缓存、版本相同不清匹配缓存）、getItem null 出口、空闲释放清缓存 |
 | v0.16.0 | **功能性迭代**：跳过文件可观测性（`skippedCount`，dock 提示"N 个文件因过大/不可读未纳入"）；新文件跟踪（设置 `trackNewFiles`，默认关，仅展示不可撤销）；冲突拒绝引导语；gitOriginal 降级提示；非 Windows 禁用 live 选项（前置提示）；「清理已处理」按钮（清除 kept/reverted 记录，手动清理出口） |
 | v0.16.1 | **工程化（对比 rich-file-review 补齐）**：TypeScript 类型声明（`lib/types/index.d.ts`，exports 带 types 字段）；打包产物门禁 `verify:pack`（files 清单/语法/banner/导出形状/版本一致性，对应对方 `test:pack`）；prepack 全链 = build + test + verify |
-| v0.16.2-0.16.4 | **typert 传输修复（首次端到端跑通）**：v0.4 起 client 用 src-json codec + 单参数调用，被宿主 client loader 静默拒绝——v0.4.x 的 HTTP fetch 回退一直掩盖该缺陷，v0.8 删回退后暴露。修复：client 打印真实错误（不再静默）；descriptor 改用 strict codec（host `z.any()` / client 鸭子 zod schema，透传语义不变）；调用改为 `(undefined, request)` 占位（宿主把 lookup 参数计入 arity）。**升级旧版本后务必硬刷新/无痕窗口验证** |
+| v0.16.2-0.16.4 | **typert 传输修复（首次端到端跑通）**：v0.4 起 client 用 src-json codec + 单参数调用，被宿主 client loader 静默拒绝——v0.4.x 的 HTTP fetch 回退一直掩盖该缺陷，v0.8 删回退后暴露。修复：client 打印真实错误（不再静默）；descriptor 改用 strict codec（host `z.any()` / client 鸭子 zod schema，透传语义不变）。**升级旧版本后务必硬刷新/无痕窗口验证** |
+| v0.16.5 | **typert 调用约定修正（真正的端到端可用）**：v0.16.2-0.16.4 虽能连上，但 client 调用约定错误导致数据调用全部失败（dock 永远"未识别"、设置保存失败，host 日志却一切正常）。修正：命名空间方法签名 = (lookup 参数, 业务参数...)，client **显式传 sessionId 作 lookup 参数**（官方模式，`(undefined, request)` 占位会让 request 落错位被 host 拒绝）；返回 `RemoteResult` 信封须解包 `.value`（不解包则业务字段全 undefined）；host 返回须纯 JSON 安全（含 undefined 值被 gateway 边界校验拒绝，itemFull 修复 + verify-pack 新增 undefined 字段门禁）。**验证纪律：RPC 能连上、UI 能渲染 ≠ 数据调用正确，必须看 client 实际收到的响应** |
 
 ## 许可
 
