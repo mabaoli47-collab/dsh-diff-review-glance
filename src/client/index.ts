@@ -62,10 +62,19 @@ async function initRemote() {
 // 宿主 client runtime 把 descriptor 的 lookup 参数（agent）也算进调用参数位
 // （"expected 2 argument(s), got 1"）——第 1 参传 undefined 占位，wire 层按 scope
 // lookup 注入真实 agent（host 侧方法签名为 (agent, request)）。
+// 返回解包：typert 命名空间方法返回 RemoteResult<{ ok, value }> 包装，业务数据在
+// value 里——官方 client（ui-goal 等）均用 result.value 读取。不解包会导致
+// 顶层字段全 undefined（dock 永远"未识别"、保存永远失败）。
 async function callHost(action, args) {
   try {
     const ns = await initRemote()
-    return await ns[action](undefined, args || {})
+    const r = await ns[action](undefined, args || {})
+    if (r && typeof r === 'object' && 'ok' in r) {
+      if (r.ok === true) return r.value
+      // ok=false：RPC 层业务错误，返回带 message 的错误对象（与旧 HTTP 语义一致）
+      return { ok: false, message: (r.error && (r.error.message || JSON.stringify(r.error))) || 'RPC 调用失败' }
+    }
+    return r
   } catch (e) {
     console.error('[dsh-diff-review] callHost(' + action + ') 失败:', e)
     throw e
