@@ -567,6 +567,10 @@ function apply(ctx) {
     const [sessionError, setSessionError] = React.useState(null)
     const pending = (snap && snap.pending) || []
     const pendingCount = (snap && typeof snap.pendingCount === 'number') ? snap.pendingCount : pending.length
+    // 实时模式：徽记应反映进行中修改——把 live 预览项数并入总数（正式项 + 实时预览），
+    // 否则 detectMode=live 时文件一变徽记不刷新（live 项在回合结束才并入正式 pending）
+    const liveCount = (snap && Array.isArray(snap.live)) ? snap.live.length : 0
+    const badgeCount = pendingCount + liveCount
     const loading = !!(snap && snap.loading)
     const truncated = !!(snap && snap.truncated)
     const sessions = (snap && snap.sessions) || []
@@ -578,7 +582,7 @@ function apply(ctx) {
     const head = React.createElement('div', { className: 'dshdr-bar', onClick: () => setOpen(!open) },
       React.createElement('span', { className: 'dshdr-title' },
         React.createElement('span', null, '待审阅修改'),
-        React.createElement('span', { className: 'dshdr-count' }, pendingCount),
+        React.createElement('span', { className: 'dshdr-count' }, badgeCount),
         loading ? React.createElement('span', { className: 'dshdr-loading', style: { padding: '0', marginLeft: '2px' } }, '加载中…') : null),
       React.createElement('span', { className: 'dshdr-toggle' }, open ? '收起' : '展开'),
       React.createElement('button', { className: 'dshdr-btn primary', onClick: (e) => { e.stopPropagation(); keepAll() } }, '工作区全部保留'))
