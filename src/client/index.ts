@@ -283,7 +283,7 @@ function apply(ctx) {
   refresh()
 
   injectCss('\n' +
-    '.dshdr-dock { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: var(--dsh-composer-card-max-width); margin: 2px auto 8px; }\n' +
+    '.dshdr-dock { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: var(--dsh-composer-card-max-width); margin: 2px auto 8px; max-height: 60vh; overflow-y: auto; overflow-x: hidden; }\n' +
     '.dshdr-bar { display: flex; align-items: center; gap: 10px; padding: 7px 12px; border: 1px solid rgba(128,128,128,0.4); border-radius: 10px; background: rgba(128,128,128,0.16); cursor: pointer; user-select: none; }\n' +
     '.dshdr-bar:hover { background: rgba(128,128,128,0.24); }\n' +
     '.dshdr-title { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px; }\n' +
